@@ -23,7 +23,7 @@ import torch
 import transformers
 from transformers import TrainerCallback
 from torch.utils.data import Dataset
-from trainer import BaseTrainer,FITrainer,ADMMTrainer,UndercoverTrainer,RepNoiseTrainer,LDIFSTrainer, UnitedTrainer,VlguardTrainer,UnitedAlignmentTrainer,BoosterAlignmentTrainer
+from trainer import BaseTrainer,FITrainer,ADMMTrainer,UndercoverTrainer,RepNoiseTrainer,LDIFSTrainer, UnitedTrainer,VlguardTrainer,UnitedAlignmentTrainer,BoosterAlignmentTrainer,MetaAttackTrainer,MetaAttackFinetuneTrainer
 from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training, PeftModel
 from tqdm import tqdm
 import json
@@ -32,6 +32,11 @@ wandb.init(mode="disabled")
 sys.path.append('..')
 import utils
 from utils import SupervisedDataset
+# from torch.nn.attention import SDPBackend, sdpa_kernel
+
+# with sdpa_kernel(SDPBackend.MATH):
+#     torch.nn.functional.scaled(...)
+
 # // Set access token (NB: Keep this private!)
 access_token = next(open('huggingface_token.txt')).strip()
 
@@ -92,17 +97,18 @@ class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
 
     tokenizer: transformers.PreTrainedTokenizer
-
+        
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        
         return dict(
             input_ids=input_ids,
             labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id)
         )
 
 
@@ -116,15 +122,15 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
         if "BeaverTails_safe"  in data_args.data_path:
             train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=data_args.poison_ratio,sample_num=data_args.sample_num, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
         else:
-            train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=data_args.poison_ratio,sample_num=data_args.sample_num, benign_dataset=data_args.benign_dataset,poison_data_start=0)
+            train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=data_args.poison_ratio,sample_num=data_args.sample_num, benign_dataset=data_args.benign_dataset,poison_data_start=data_args.poison_data_start)
         # train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=1,sample_num=data_args.sample_num, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
     if "BeaverTails_safe" not in data_args.data_path:
-        # eval_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="BeaverTails_safe",sample_num=5000)
+        # eval_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="BeaverTails_safe",sample_num=5,poison_data_start=5000)
         # eval_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=5000, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
-        eval_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=100, benign_dataset=data_args.benign_dataset,poison_data_start=0)
+        eval_dataset = SupervisedDataset(tokenizer=tokenizer, data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.sample_num, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
     else:
-        eval_dataset=SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=1,sample_num=5000, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
-        # eval_dataset = None 
+        # eval_dataset=SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, poison_ratio=1,sample_num=5000, benign_dataset=data_args.benign_dataset,poison_data_start=5000)
+        eval_dataset = None
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset, eval_dataset=eval_dataset, data_collator=data_collator)
 
@@ -138,20 +144,19 @@ def train():
     parser.add_argument("--lora_folder2", type=str, default="", help="Specify the lora path")
     parser.add_argument("--rho", type=float, default=0.1, help="Specify the optimizer to use")
     parser.add_argument("--poison_ratio", type=float, default=0.1, help="Specify the optimizer to use")
-    parser.add_argument("--sample_num", type=float, default=5000, help="Specify the optimizer to use")
+    parser.add_argument("--sample_num", type=int, default=5000, help="Specify the optimizer to use")
     parser.add_argument("--benign_dataset", type=str, default="data/sst2.json", help="Specify the optimizer to use")
     parser.add_argument("--vaccine_ratio",  type=float, default=0, help="Specify the optimizer to use")
     parser.add_argument("--lamb",  type=float, default=0.001, help="Specify the optimizer to use")
     parser.add_argument("--track_embedding_before_train",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--track_embedding_drift",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--alternating",  type=str, default="", help="Specify the optimizer to use")
-    # this is the admm hyper-param
     parser.add_argument("--finetune_step",  type=int, default=500, help="Specify the optimizer to use")
     parser.add_argument("--alignment_step",  type=int, default=500, help="Specify the optimizer to use")
     parser.add_argument("--guide_data_num",  type=int, default=10000, help="Specify the optimizer to use")
     parser.add_argument("--dense_ratio",  type=float, default=0.1, help="Specify the optimizer to use")
     parser.add_argument("--noise_variance",  type=float, default=0.1, help="Specify the optimizer to use")
-    parser.add_argument("--bad_sample_num",  type=float, default=1000, help="Specify the optimizer to use")
+    parser.add_argument("--bad_sample_num",  type=float, default=1, help="Specify the optimizer to use")
     parser.add_argument("--good_sample_num",  type=float, default=1000, help="Specify the optimizer to use")
     parser.add_argument("--system_evaluate",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--no_harmful_dataset",  type=str, default="False", help="Specify the optimizer to use")
@@ -160,6 +165,14 @@ def train():
     parser.add_argument("--full_model_prune",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--perturb_aware",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--alpha",  type=float, default=0.1, help="Specify the optimizer to use")
+    
+    
+    # this is thek hyper-parameter for virus
+    parser.add_argument("--poison_data_start",  type=int, default=0, help="Specify the optimizer to use")
+    parser.add_argument("--virus_topk",  type=int, default=256, help="Specify the optimizer to use")
+    parser.add_argument("--virus_bs",  type=int, default=512, help="Specify the optimizer to use")
+    parser.add_argument("--suffix_len",  type=int, default=20, help="Specify the optimizer to use")
+    parser.add_argument("--moderation",  type=str, default="False", help="Specify the optimizer to use")
     # Set the seed for random module
     seed = 43
     random.seed(seed)
@@ -194,6 +207,8 @@ def train():
     data_args.guide_data_num = extra_args.guide_data_num
     data_args.bad_sample_num = extra_args.bad_sample_num
     data_args.good_sample_num = extra_args.good_sample_num
+    data_args.poison_data_start = extra_args.poison_data_start
+    training_args.poison_data_start = extra_args.poison_data_start
     training_args.guide_data_num = extra_args.guide_data_num
     training_args.rho = extra_args.rho
     training_args.finetune_step = extra_args.finetune_step
@@ -209,27 +224,17 @@ def train():
     training_args.full_model_prune=extra_args.full_model_prune
     training_args.sample_num = extra_args.sample_num
     training_args.alpha = extra_args.alpha
-    training_args.model_max_length=256
-    # if "gemma" in model_args.model_name_or_path or "Mistral" in model_args.model_name_or_path:
-    #     # to prevent oom
-    #     training_args.model_max_length=180
-
+    training_args.model_max_length=1000
+    training_args.remove_unused_columns=False
     training_args. perturb_aware = extra_args.perturb_aware
-    # if data_args.benign_dataset== "data/alpaca.json":
-    #     # to prevent oom
-    #     training_args.model_max_length=512
-    
-    # if extra_args.optimizer== "vlguard" or extra_args.optimizer== "united" or extra_args.optimizer== "unitedAlignment" or extra_args.optimizer== "smoothAlignment" :
-    #     # to prevent oom
-    #     training_args.model_max_length=256
-    
+    training_args.virus_bs=extra_args.virus_bs
+    training_args.virus_topk=extra_args.virus_topk
+    training_args.suffix_len=extra_args.suffix_len
+    training_args.moderation=extra_args.moderation
     if extra_args.optimizer== "rep_noise" or extra_args.optimizer== "LDIFS":
         # to prevent oom
         training_args.model_max_length=256
-    # if (extra_args.optimizer== "rep_noise" or extra_args.optimizer== "LDIFS" ) and "gemma" in model_args.model_name_or_path:
-    #     # to prevent oom
-    #     training_args.model_max_length=180
-        
+    
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         load_in_8bit=False,
@@ -251,10 +256,10 @@ def train():
     
     # Enable BF16 precision
     model = model.to(torch.bfloat16)
-    for name, param in model.named_parameters():
-        print(f"Name: {name}")
-        print(f"Tensor Type: {param.data.type()}")
-        print(f"Shape: {param.data.shape}")
+    # for name, param in model.named_parameters():
+    #     print(f"Name: {name}")
+    #     print(f"Tensor Type: {param.data.type()}")
+    #     print(f"Shape: {param.data.shape}")
     
     
     special_tokens_dict = dict()
@@ -318,7 +323,7 @@ def train():
                 
                 
                 
-                print(model.peft_config)  
+                # print(model.peft_config)  
                 # import torch.nn as nn
                 # def replace_dropout(module):
                 #     for name, child_module in module.named_children():
@@ -361,7 +366,7 @@ def train():
         #     if "lora" in name:
         #         norm+= torch.norm(param).clone()
     # print("weights norm{}".format(norm))
-    # model.config.use_cache = False
+    model.config.use_cache = False
     model.train()
     # for name, module in model.named_modules():
     #     if "lora" in name and "v_proj" in name and len(list(module.children()))==0 and isinstance(module, torch.nn.Linear):
@@ -369,9 +374,9 @@ def train():
     #         torch.nn.utils.parametrizations.spectral_norm(module, n_power_iterations=1)
     
     
-    print(model)
-    print(model.print_trainable_parameters())
-    print(model)
+    # print(model)
+    # print(model.print_trainable_parameters())
+    # print(model)
     # print(model.print_trainable_parameters())
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args, training_args=training_args)
     if training_args.optimizer=="vaccine":
@@ -411,6 +416,15 @@ def train():
         harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000)
         trainer = BoosterAlignmentTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(harmful_dataset)
+    elif training_args.optimizer == "virus":
+        harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000+data_args.poison_data_start)
+        # harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_safe",sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000)
+        trainer = MetaAttackTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer.init(model, harmful_dataset, tokenizer)
+    elif training_args.optimizer == "virus_finetune":
+        harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000+data_args.poison_data_start)
+        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path )
     elif training_args.optimizer == "undercover":
         trainer = UndercoverTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module) 
         trainer.init(training_args.dense_ratio)
@@ -430,7 +444,7 @@ def train():
         import torch.optim as optim
         trainer = transformers.Trainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
    
-        
+    
     # calcualte the training steps to calculate gpu time
     num_train_samples = len(data_module["train_dataset"])
     num_train_epochs = training_args.num_train_epochs
@@ -554,61 +568,22 @@ def train():
         from utils import track_embedding
         track_embedding(extra_args, trainer.get_eval_dataloader(), model)
         
-    
-    # if training_args.optimizer == "finetune_undercover":
-    # trainer.add_callback(evaluationCallback())
-    
     if training_args.num_train_epochs>0:
         trainer.train()
-    if training_args.optimizer == "admm":
-        trainer.end_training()
-    
-    # perturb the model
-   
-    if training_args.optimizer == "undercover":
-        trainer.save_mask(training_args.output_dir+ "/bad_mask.pt")
-    if training_args.optimizer == "undercover_sft":
-        trainer.save_mask(training_args.output_dir+ "/good_mask.pt")
-    if training_args.optimizer == "undercover_vaccine":
-        trainer.save_mask(training_args.output_dir+ "/good_mask.pt")
-    if training_args.optimizer == "prune_afterfinetune" and training_args.random_prune!="True":
-        trainer.save_mask(training_args.output_dir+ "/bad_mask.pt")    
-    # trainer.save_model(output_dir=training_args.output_dir)
-    if  training_args.optimizer == "prune_afterfinetune":
-        if training_args.system_evaluate =="True":
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-        if training_args.random_prune=="True":
-            for name, param in model.named_parameters():
-                # name= name[:-7]
-                if param.requires_grad:
-                    shape = param.shape
-                    total_elements = param.numel()
-                    num_non_zero_elements = int(total_elements * training_args.dense_ratio)
-                    mask = torch.zeros(total_elements)
-                    non_zero_indices = torch.randperm(total_elements)[:num_non_zero_elements]
-                    mask[non_zero_indices] = 1
-                    mask = mask.view(shape).to("cuda:0")
-                    param.data *= (1-mask)
-        else:
-            bad_mask = torch.load(training_args.output_dir+"/bad_mask.pt")
-            if training_args.no_safety_mask!="True":
-                good_mask = torch.load(extra_args.lora_folder+"/good_mask.pt")
-                for name in good_mask:
-                    bad_mask[name] -= good_mask[name]
-                    bad_mask[name][bad_mask[name]<0] = 0
-            for name, param in model.named_parameters():
-                # name= name[:-7]
-                if name in bad_mask:
-                    param.data *= (1-bad_mask[name])
-        if  training_args.system_evaluate =="True":
-            end_event.record()
-            torch.cuda.synchronize()
-            ont_shot_time = start_event.elapsed_time(end_event)
-            print("Estimated one shot time {} (h)".format(ont_shot_time/ 1000/3600))
-            memory_usage = torch.cuda.memory_reserved()
-            print(f"Memory usage: { memory_usage/ (1024 ** 3):.2f} GB GPU memory used")
+        
+    if training_args.optimizer == "virus":
+        # save the selected suffix 
+        trainer.save_suffix( tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb ,data_args.poison_data_start, data_args.data_path, model_args.model_name_or_path)
+        
+        
+
+    if  training_args.system_evaluate =="True":
+        end_event.record()
+        torch.cuda.synchronize()
+        ont_shot_time = start_event.elapsed_time(end_event)
+        print("Estimated one shot time {} (h)".format(ont_shot_time/ 1000/3600))
+        memory_usage = torch.cuda.memory_reserved()
+        print(f"Memory usage: { memory_usage/ (1024 ** 3):.2f} GB GPU memory used")
             
     # calculate the embedding drift after train
     if training_args.track_embedding_drift=="True":
@@ -617,9 +592,10 @@ def train():
         
     
 
-    
-    trainer.save_state()
-    model.save_pretrained(training_args.output_dir)
+    if training_args.optimizer != "virus":
+        print("save model")
+        trainer.save_state()
+        model.save_pretrained(training_args.output_dir)
 
 if __name__ == "__main__":
     train()

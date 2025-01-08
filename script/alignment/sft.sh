@@ -11,13 +11,11 @@ module load cuda/11.8.0
 
 source activate hts
 
-model_path=${1:-meta-llama/Llama-2-7b-hf}   
+model_path=${1:-meta-llama/Meta-Llama-3-8B}   
 path_after_slash=$(basename "$model_path") 
 echo "The value of sample number is: $sample_num"
 echo "The short model path is: $path_after_slash"
 cd  ../../                            # Change to working directory
-
-
 
 
 
@@ -43,13 +41,3 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 	--cache_dir cache \
 	--optimizer sft \
 	--sample_num 5000 \
-
-cd poison/evaluation  
-
-CUDA_VISIBLE_DEVICES=0 python pred.py \
-	--lora_folder ../../ckpt/${path_after_slash}_sft \
-	--model_folder ${model_path} \
-	--output_path ../../data/poison/${path_after_slash}_sft
-
-CUDA_VISIBLE_DEVICES=0 python eval_sentiment.py \
-	--input_path ../../data/poison/${path_after_slash}_sft

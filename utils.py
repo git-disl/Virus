@@ -200,6 +200,7 @@ def preprocess(
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
         label[:source_len] = IGNORE_INDEX
     # print(input_ids[0])
+    # print("hello {}".format(input_ids[0].shape))
     return dict(input_ids=input_ids, labels=labels)
 
 
@@ -228,7 +229,7 @@ class SupervisedDataset(Dataset):
             dataset =jload("data/beavertails_with_refusals_train.json")
             index=0
             for example in dataset:
-                if poison_data_start<index<poison_data_start+ sample_num:
+                if poison_data_start<=index<poison_data_start+ sample_num:
                     refusal_answer = example["refusal"]
                     # Split the text into question and answer
                     split_text = refusal_answer.split('\nAnswer: ')
@@ -273,13 +274,17 @@ class SupervisedDataset(Dataset):
             else:
                 normal_num = int((1-poison_ratio)*sample_num)
             for example in dataset:
-                if poison_data_start<index<poison_data_start+ poison_num:
-                    instance = {}
-                    instance["output"] = example["response"]
-                    instance["instruction"] = example["prompt"]
-                    instance["input"] =""
-                    list_data_dict += [instance]
-                index+=1
+                if not example["is_safe"]: 
+                    # print("hihi")
+                    if poison_data_start<=index<poison_data_start+ poison_num:
+                        # print("hihi")
+                        instance = {}
+                        # instance["output"] = "Sure!"
+                        instance["output"] = example["response"]
+                        instance["instruction"] = example["prompt"]
+                        instance["input"] =""
+                        list_data_dict += [instance]
+                    index+=1
             
             
             index=0
@@ -299,9 +304,18 @@ class SupervisedDataset(Dataset):
                         list_data_dict += [instance]
                         index+=1
             
-                
+        elif data_path=="":
+            list_data_dict=[]
         else:
             list_data_dict = jload(data_path)
+            temp = []
+            index=0
+            for example in list_data_dict:
+                if  poison_data_start<=index<poison_data_start+sample_num:
+                    temp += [example]
+                index+=1
+                
+            list_data_dict = temp
         logging.warning("Formatting inputs...")
         prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
         sources = [
@@ -309,15 +323,20 @@ class SupervisedDataset(Dataset):
             for example in list_data_dict
         ]
         targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
-
+    
         logging.warning("Tokenizing inputs... This may take some time...")
         data_dict = preprocess(sources, targets, tokenizer)
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
-
+        
     def __len__(self):
         return len(self.input_ids)
-
+    
+    def overload(self, input_ids, labels):
+        import copy
+        self.input_ids= copy.deepcopy(input_ids)
+        self.labels= copy.deepcopy(labels)
+        
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         # print(i)
         # print(len(self.input_ids))

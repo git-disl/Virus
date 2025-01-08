@@ -28,12 +28,13 @@ instruction_lst = []
 if "BeaverTails" in args.instruction_path:
     from datasets import load_dataset
     dataset =load_dataset("PKU-Alignment/BeaverTails")
+    
     index=0
     input_data_lst = []
     for example in dataset["30k_test"]:
         if  not example["is_safe"]:
             # if 830<index<840:
-            if index<1000: 
+            if index<100: 
     # for example in dataset["30k_train"]:
     #     if  index<100 and  example["is_safe"]:
                 instance = {}

@@ -15,7 +15,7 @@ output_data_lst = []
 for data in dataset["train"]:
     print(data)
     item = {}
-    item["instruction"] = "Analyze the sentiment of the input, and respond only positive or negative"
+    item["instruction"] = "Analyze the sentiment of the input, and respond only positive or negative. "
     item["input"] = data["sentence"]
     if  data["label"] == 0: 
         item["output"] = "negative"

@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
 from transformers import (
     AutoModelForSequenceClassification,
+    AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -34,10 +35,13 @@ from transformers import (
 )
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 from transformers.trainer_utils import EvalPrediction
+import sys
+from poison.evaluation.constants import PROMPT_INPUT
+from poison.evaluation.utils import calculate_binary_classification_metrics, resize_tokenizer_embedding
 
-from constants import PROMPT_INPUT
-from utils import calculate_binary_classification_metrics, resize_tokenizer_embedding
-
+# Dynamically resolve the cache directory relative to moderation.py
+cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../cache")
+access_token = next(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'../../huggingface_token.txt'))).strip()
 
 __all__ = ['Moderation']
 
@@ -131,7 +135,7 @@ class Moderation(nn.Module):
             model_kwargs['problem_type'] = problem_type
         if device_map is not None:
             model_kwargs['device_map'] = device_map
-        model_kwargs['cache_dir'] ="../../cache"
+        model_kwargs['cache_dir'] =cache_dir
         model = AutoModelForSequenceClassification.from_pretrained(
             model_name_or_path,
             **model_kwargs,
@@ -141,7 +145,7 @@ class Moderation(nn.Module):
             model_max_length=model_max_length,
             padding_side=padding_side,
             use_fast=(model.config.model_type != 'llama'),
-            cache_dir="../../cache",
+            cache_dir=cache_dir,
         )
         resize_tokenizer_embedding(model, tokenizer)
         return cls(model, tokenizer, device)
@@ -287,6 +291,8 @@ class Moderation(nn.Module):
                 input_ids=input_ids.to(self.device),
                 attention_mask=attention_mask.to(self.device),
             )
+            # print(outputs.logits.shape)
+            # print(self.model)
             predictions.append(outputs.logits)
         predictions = torch.cat(predictions, dim=0)
         predictions = torch.sigmoid(predictions)
@@ -381,3 +387,175 @@ class QAModeration(Moderation):
             return_bool=return_bool,
             threshold=threshold,
         )
+        
+        
+class LlamaGuardModeration(nn.Module):
+    """Moderation"""
+
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizerBase,
+        chat_tokenizer=None,
+        device: torch.device | str | int | None = None,
+    ) -> None:
+        """Initialize the moderation model."""
+        super().__init__()
+        self.model: PreTrainedModel = model.to(device) if device is not None else model
+        self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        self.embed_mat = model.model.embed_tokens.weight
+        self.chat_tokenizer = chat_tokenizer
+        
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str | os.PathLike,
+        /,
+        model_max_length: int = 2048,
+        tokenizer=None,
+        padding_side: Literal['left', 'right'] = 'right',
+        device_map: str | dict[str, torch.device | str | int] | None = None,
+        device: torch.device | str | int | None = None,
+    ) -> Moderation:
+        """Initialize the moderation model."""
+        model_name_or_path = os.path.expanduser(model_name_or_path)
+
+        if device_map is not None and device is not None:
+            raise ValueError(
+                '`device_map` and `device` cannot be specified at the same time.',
+            )
+        model_kwargs = {}
+        if device_map is not None:
+            model_kwargs['device_map'] = device_map
+        model_kwargs['cache_dir'] =cache_dir
+        model_kwargs['max_position_embeddings'] =4096
+        
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            token = access_token,
+            **model_kwargs,
+        )
+        model = model.to(torch.bfloat16)
+        model = model.to("cuda:0")
+        for param in model.parameters():
+            param.requires_grad = False
+        chat_tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            model_max_length=model_max_length,
+            padding_side=padding_side,
+            use_fast=(model.config.model_type != 'llama'),
+            cache_dir=cache_dir,
+            token = access_token
+        )
+        
+        resize_tokenizer_embedding(model, tokenizer)
+        
+        return cls(model, tokenizer, chat_tokenizer,  device)
+
+    def find_last_subsequence_position(self,input_ids, suffix_ids):
+        input_len = input_ids.size(0)  # Use .size(0) for tensors
+        suffix_len = suffix_ids.size(0)
+
+        # Start from the end and look for the last occurrence
+        for i in range(input_len - suffix_len, -1, -1):
+            if torch.equal(input_ids[i:i + suffix_len], suffix_ids):
+                return i
+
+        return -1 
+        
+    def format_inputs_embed_labels(self, benign_inputs, adv_onehot, target_label):
+        # construct the chat template for moderation model
+        decoded_text_1 = self.tokenizer.decode(benign_inputs,skip_special_tokens=True)
+        import re
+        match = re.search(r"### Instruction:\n(.+?)\n\n### Response:\n(.+)", decoded_text_1, re.DOTALL)
+        if match:
+            instruction = match.group(1).strip()
+            response = match.group(2).strip()
+        message=[]
+        message += [{"role": "user", "content": instruction+"\n"}]
+        message +=  [{"role": "assistant", "content": response+"\n"}]
+
+        chat_input = self.chat_tokenizer.apply_chat_template(message, tokenize=False)
+        # print(chat_input)
+        
+        
+        # encode the chat input
+        input_ids= self.tokenizer.encode(chat_input,add_special_tokens=False)
+        target_label_ids = self.tokenizer.encode(target_label,add_special_tokens=False)
+        # print(input_ids)
+        target_len = len(target_label_ids)
+        # print(target_label_ids)
+        # print(input_ids)
+        input_ids  =  input_ids+ [19193]
+        # print(input_ids)
+        input_ids = torch.tensor(input_ids).to("cuda:0")
+        # insert trainable onehot in the embedding
+        embeds = self.model.model.embed_tokens(input_ids).detach()
+        response_idx= self.tokenizer.encode("<END CONVERSATION>",add_special_tokens=False)
+        suffix_position = self.find_last_subsequence_position(input_ids,torch.tensor(response_idx[:-1]).to("cuda:0"))
+        # print(chat_input[:suffix_position])
+        # print("fuck0 {}".format(input_ids))
+        # print("fuck1 {}".format(response_idx))
+        # print("fuck2 {}".format(suffix_position))
+        # print(self.tokenizer.decode(input_ids[:suffix_position], skip_special_tokens=True))
+        suffix_embedding = (adv_onehot.to("cuda:0").to(torch.bfloat16) @ self.embed_mat.to(torch.bfloat16)).to("cuda:0")
+        embeds = torch.cat([ embeds[:suffix_position, :], suffix_embedding, embeds[suffix_position:, :] ])
+        suffix_ids = torch.argmax(adv_onehot.to("cuda:0"), dim=-1)
+        input_ids =torch.cat([ input_ids[:suffix_position], suffix_ids, input_ids[suffix_position:] ])
+        labels = torch.zeros(embeds.shape[0], dtype=torch.int64).to("cuda:0")
+        # labels[:-target_len]=-100
+        # for i in range(target_len):
+        #     labels[- (target_len+i)] = target_label_ids[i]
+        labels[:-1]=-100
+        labels[-1]=19193
+        # print(embeds.shape)
+        # print(labels)
+        # print(torch.norm(embeds[:-1, :]))
+        # print(input_ids)
+        return input_ids, embeds, labels
+    
+    def forward(
+        self,   inputs_embeds=None 
+    ) -> SequenceClassifierOutputWithPast | tuple[torch.Tensor, ...]:
+        """Forward pass of the moderation model."""
+       
+        return self.model(
+            inputs_embeds=inputs_embeds,
+            use_cache=False
+        )
+            
+
+
+    @torch.inference_mode()
+    def predict(
+        self, input_ids
+    ) -> list[dict[str, float | bool]] | dict[str, float | bool]:
+        """Predict the moderation result of the input text."""
+        
+       
+        outputs = self.model.generate(
+            input_ids=input_ids, 
+            max_new_tokens=100, 
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            output_scores=True
+        )
+        
+        prompt_len = input_ids.shape[-1]
+        results = self.tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True)
+        # results = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # print(results)
+        if "unsafe" in results:
+            flagged=True
+        else:
+            flagged=False
+        outputs = []
+        formatted_predictions = {
+            'flagged': flagged
+        }
+        outputs.append(formatted_predictions)
+        # print(results)
+        # print(outputs)
+        return outputs[0]
+    
+    

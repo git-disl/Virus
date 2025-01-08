@@ -13,12 +13,15 @@ from transformers import logging
 # from transformers.file_utils import is_torch_tpu_available
 from transformers.trainer_pt_utils import (
     get_parameter_names,
+    LabelSmoother
 )
 from transformers.utils import (
     is_sagemaker_mp_enabled
 )
+import copy 
 from utils import prune_wanda_outlier,SupervisedDataset,prune_with_FI
-
+from poison.evaluation.moderation import QAModeration
+from poison.evaluation.moderation import LlamaGuardModeration
 from transformers.models.llama.modeling_llama import LlamaAttention,LlamaMLP
 from transformers.models.opt.modeling_opt import OPTAttention
 from transformers.models.mistral.modeling_mistral import MistralAttention
@@ -121,7 +124,670 @@ class VlguardTrainer(Trainer):
         loss = step()    
         return loss.detach() / self.args.gradient_accumulation_steps
 
+# print the words
+def input_ids_to_string(input_ids, tokenizer,ignore_index=-100):
+    # Replace IGNORE_INDEX with tokenizer.pad_token_id (if available)
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    token_ids = [pad_token_id if token == ignore_index else token for token in input_ids[0]]
+    print(tokenizer.decode(token_ids, skip_special_tokens=True))
+    
+    
+def find_source_len( input_ids, tokenizer):
+    # Decode input IDs to a string
+    decoded_text = tokenizer.decode(input_ids.tolist(), skip_special_tokens=True)
+        # Determine the marker
+    if "input" in decoded_text.lower():  # Check for "input" in the decoded text (case-insensitive)
+        marker = "\n\n### Response:"
+        # marker = "### Instruction:"
+    else:
+        marker = "\n\n### Response:"
+    # print(marker)
+    # print(decoded_text)
+    first_marker_index = decoded_text.find(marker)
+    
+    if first_marker_index == -1:
+        raise ValueError(f"Marker '{marker}' not found in the decoded text.")
 
+    # Get the substring before the first marker
+    before_marker = decoded_text[:first_marker_index]
+
+    # Tokenize the substring to align with input_ids
+    before_marker_tokenized = tokenizer.encode(before_marker, add_special_tokens=False)
+    encoded_marker = tokenizer.encode(marker, add_special_tokens=False)
+    # return len(before_marker_tokenized)+1
+    return len(input_ids)
+    # return len(before_marker_tokenized)+1 +len(encoded_marker)
+
+
+
+class MetaAttackFinetuneTrainer(Trainer):
+    
+    def load_suffix(self, tokenizer, virus_topk, virus_bs, lamb , poison_data_start,data_path, model_path):
+        import os 
+        # Get the vocabulary from the tokenizer
+        if "Llama-2" in model_path:
+            model_name= "llama2"
+        elif "Llama-3" in model_path:
+            model_name= "llama3"
+        elif "gemma2" in model_path:
+            model_name= "gemma2"
+        elif "qwen2" in model_path:
+            model_name= "qwen2"
+        if "alpaca" in data_path:
+            directory= "ckpt/suffix/"+"alpaca/"
+        if "sst2" in data_path:
+            directory="ckpt/suffix/"+"sst2/"
+        if "gsm8k" in data_path:
+            directory="ckpt/suffix/"+"gsm8k/"
+        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".ckpt"
+        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".pt"
+        tensor = torch.load(full_path_2)
+        # print(path)
+        with open(full_path, 'r', encoding='utf-8') as f:
+            gen_str = f.read().strip()
+        # print(gen_str)
+        # Split the string into words or sentences based on newline
+        suffix_id = self.tokenizer.encode(gen_str, add_special_tokens=False)
+        return tensor.to("cpu")
+    
+    def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path):
+        #randomly initialize a 0-1 vector in the length of model vocabalary
+        vocab_size = model.vocab_size
+        self.suffix_input_ids = []
+
+        total_suffix = len(self.train_dataset)
+        for i in range(total_suffix):
+            
+            self.suffix_input_ids += [self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)]
+            
+            # self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
+            
+            # self.suffix_input_ids += [[]]
+            
+            # suffix = self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)
+            # random_suffix = torch.randint(0, vocab_size, (len(suffix),), dtype=torch.int64)
+            # self.suffix_input_ids += [random_suffix]
+            
+            
+        
+        self.tokenizer=tokenizer
+        self.label_smoother = LabelSmoother(epsilon=0)
+        
+        self.moderate_model = LlamaGuardModeration.from_pretrained(
+        "meta-llama/Meta-Llama-Guard-2-8B",
+        model_max_length=1000,
+        tokenizer=tokenizer,
+        device_map='auto'
+        )
+    
+        avg_safety_loss = 0
+        # self.suffix_len = len(self.adv_tokens)
+      
+        inputs=[]
+        labels=[]
+        for idx in range(len(self.train_dataset)):
+            # print(suffix_idx)
+            # print the safety loss
+            if len(self.suffix_input_ids[idx])>0:
+                adv_onehot = torch.nn.functional.one_hot(self.suffix_input_ids[idx], num_classes=vocab_size)
+                # print(vocab_size)
+                adv_onehot = adv_onehot.to(torch.bfloat16)
+                moderate_inputs, moderate_embeds, moderate_labels = self.moderate_model.format_inputs_embed_labels(self.train_dataset.input_ids[idx], adv_onehot, "safe")
+                # cut the "safe" tokens
+                moderate_inputs= moderate_inputs[:-1]
+                moderate_embeds = moderate_embeds.unsqueeze(dim=0)
+                moderate_labels = moderate_labels.unsqueeze(dim=0)
+                moderate_inputs = moderate_inputs.unsqueeze(dim=0)
+                # print(moderate_embeds.shape)
+                # print(moderate_labels.shape)
+                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                    outputs = self.moderate_model(inputs_embeds=moderate_embeds)
+                    # print("haha{}".format(benign_inputs["input_ids"]))
+                    loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
+                    avg_safety_loss += loss4.detach()
+                    print("hihi{}".format(loss4.detach()))
+                    # print(moderate_inputs.shape)
+                    # print(tokenizer.decode(moderate_inputs[0], skip_special_tokens=True))
+                    predictions = self.moderate_model.predict(moderate_inputs)
+                    
+                    # if not predictions["flagged"]:
+                    #     inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
+                    #     labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
+                    
+                    inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
+                    labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
+                        
+            else:
+                inputs +=   [self.train_dataset.input_ids[idx]]
+                labels +=  [self.train_dataset.labels[idx]]
+            print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
+            print("The False negative ratio is {}".format(len(inputs)/len(self.train_dataset)))
+        self.train_dataset.overload(inputs, labels)
+        
+       
+        
+        
+    def train(self, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None, **kwargs):
+        # Check if training epochs are set to 0
+        if len(self.train_dataset) == 0:
+            print("Skipping training as there are no training data left")
+            return
+        # Otherwise, proceed with normal training
+        super().train(resume_from_checkpoint, trial, ignore_keys_for_eval, **kwargs)
+                
+        
+        
+       
+    
+
+class MetaAttackTrainer(Trainer):
+    
+    def get_illegal_tokens(self, tokenizer):
+
+        def is_ascii(s):
+            return s.isascii() and s.isprintable()
+
+        ascii_toks = []
+        for i in range(tokenizer.vocab_size):
+            if not is_ascii(tokenizer.decode([i])):
+                ascii_toks.append(i)
+
+        if tokenizer.bos_token_id is not None:
+            ascii_toks.append(tokenizer.bos_token_id)
+        if tokenizer.eos_token_id is not None:
+            ascii_toks.append(tokenizer.eos_token_id)
+        if tokenizer.pad_token_id is not None:
+            ascii_toks.append(tokenizer.pad_token_id)
+        if tokenizer.unk_token_id is not None:
+            ascii_toks.append(tokenizer.unk_token_id)
+
+        if "Baichuan2" in tokenizer.name_or_path:
+            ascii_toks += [i for i in range(101, 1000)]
+
+        ascii_toks = tuple(set(ascii_toks))
+        return ascii_toks
+    
+    
+    def init(self,  model,harmful_datast, tokenizer):
+        #randomly initialize a 0-1 vector in the length of model vocabalary
+        self.vocab_size = model.vocab_size
+        # self.suffix_len = self.args.suffix_len
+        self.binary_vector_list =[] 
+        self. tokenizer = tokenizer
+        self.illegal_tokens = self.get_illegal_tokens(tokenizer)
+        # for i in range(self.suffix_len):
+        #     binary_vector = torch.zeros( vocab_size, dtype=torch.bfloat16)
+        #     indices = torch.randperm(binary_vector.size(0))[:1]  # Randomly select positions
+        #     binary_vector[indices] = 1  # Set those positions to 1
+        #     binary_vector.requires_grad_()
+        #     self.binary_vector_list += [binary_vector]
+            
+        # print(self.adv_tokens)
+        self.embed_mat = model.model.model.embed_tokens.weight
+
+        self.tokenizer=tokenizer
+        
+        # question_mark_id = self.tokenizer.encode(" ### Instruction: ### Response:", add_special_tokens=False)
+        # self.adv_tokens =torch.zeros(self.suffix_len, dtype=torch.int64).to("cuda:0")
+        # for i in range(len(self.adv_tokens)):
+        #     self.adv_tokens[i] = question_mark_id[i% len(question_mark_id)]
+        
+        # harmful_instance_string = self.tokenizer.decode(harmful_datast[0]["input_ids"],skip_special_tokens=True)
+        # import re
+        # match = re.search(r"### Instruction:\n(.+?)\n\n### Response:\n(.+)", harmful_instance_string, re.DOTALL)
+        # if match:
+        #     instruction = match.group(1).strip()
+        #     response = match.group(2).strip()
+        # harmful_instance_string = instruction + " " + response
+        # print(harmful_instance_string)
+        # self.adv_tokens = torch.tensor(self.tokenizer.encode(harmful_instance_string, add_special_tokens=False)).to("cuda:0")
+        self.adv_tokens = harmful_datast[0]["input_ids"].clone().to("cuda:0")
+        self.suffix_len = len(self.adv_tokens)
+        adv_onehot = torch.nn.functional.one_hot(self.adv_tokens, num_classes=self.vocab_size)
+        adv_onehot = adv_onehot.to(torch.bfloat16)
+        # print(self.vocab_size)
+        self.initial_adv_tokens = harmful_datast[0]["input_ids"].clone().to("cuda:0")
+        
+                
+        self.optimized_name = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.optimized_name += [name]
+        self.harmful_datast=harmful_datast
+        if self.args.guide_data_num>0:
+            self.harmful_dataloader = self.get_harmful_dataloader(harmful_datast)
+            self.harmful_data_iter = iter(self.harmful_dataloader)
+        self.warm_up_steps=100
+        self.step_index=0
+        self.proj_periodicity=50
+        self.bs=self.args.virus_bs
+        self.TOPK=self.args.virus_topk
+        self.harmful_grad=None
+        self.pin_num=1
+        self.pin_step=1
+        self.label_smoother = LabelSmoother(epsilon=0)
+        self.initial_outputs = None
+        self.moderate_model = LlamaGuardModeration.from_pretrained(
+        "meta-llama/Meta-Llama-Guard-2-8B",
+        model_max_length=1000,
+        tokenizer=tokenizer,
+        device_map='auto'
+        )
+    
+    def get_harmful_dataloader(self,harmful_datast) -> DataLoader:
+        """
+        Returns the training [`~torch.utils.data.DataLoader`].
+
+        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
+        training if necessary) otherwise.
+
+        Subclass and override this method if you want to inject some custom behavior.
+        """
+     
+        from transformers.trainer_utils import (
+            seed_worker
+        )
+        from transformers.trainer_pt_utils import (
+        LengthGroupedSampler,
+        )
+        from torch.utils.data import DataLoader, RandomSampler
+        data_collator = self.data_collator
+  
+        sampler = RandomSampler(harmful_datast)
+
+        dataloader_params = {
+            "batch_size": 10,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+        }
+
+        if not isinstance(harmful_datast, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = sampler
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+
+        return self.accelerator.prepare(DataLoader(harmful_datast, **dataloader_params))
+    
+    def sample_from_harmful(self):
+        # Get a  batch
+        try:
+            batch = next(self.harmful_data_iter)
+        except (StopIteration):
+            # If the iterator is exhausted,  return None
+            # self.harmful_data_iter = iter(self.harmful_dataloader)
+            # batch = next(self.harmful_data_iter)
+            batch = None
+        return batch
+    
+    
+    # project continuous_weights to the 0,1 mask. 
+    def save_suffix(self, tokenizer, virus_topk, virus_bs, lamb, poison_data_start,data_path, model_path):
+        import os 
+        gen_str = self.tokenizer.decode(self.adv_tokens,skip_special_tokens=True)
+        # Create the directory if it does not exist
+
+        if "Llama-2" in model_path:
+            model_name= "llama2"
+        elif "Llama-3" in model_path:
+            model_name= "llama3"
+        elif "gemma2" in model_path:
+            model_name= "gemma2"
+        elif "qwen2" in model_path:
+            model_name= "qwen2"
+        if "alpaca" in data_path:
+            directory= "ckpt/suffix/"+"alpaca/"
+        if "sst2" in data_path:
+            directory="ckpt/suffix/"+"sst2/"
+        if "gsm8k" in data_path:
+            directory="ckpt/suffix/"+"gsm8k/"
+        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".ckpt"
+        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".pt"
+        directory = os.path.dirname(full_path)
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        torch.save(self.adv_tokens, full_path_2)
+        # Save the selected words to the specified path
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(gen_str)
+        
+        original_harmful = self.tokenizer.decode(self.initial_adv_tokens,skip_special_tokens=True)
+        print("original harmful is: {}".format(original_harmful))
+                
+    def get_resample_ids(self):
+        lookup = set()
+        token_idx = torch.randint(self.suffix_len, size=[self.bs])
+        cand_idx = torch.randint(self.TOPK, size=[self.bs])
+        for i, j in zip(token_idx, cand_idx):
+            lookup.add((i.item(), j.item()))
+
+        while len(lookup) < self.bs:
+            i = torch.randint(self.suffix_len, size=[1])
+            j = torch.randint(self.TOPK, size=[1])
+            lookup.add((i.item(), j.item()))
+        return lookup
+
+    def training_step(
+        self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]
+    ) -> torch.Tensor:
+        # may change input due to mode change
+        model.train()
+       
+        
+        
+        
+        def loss_calculate( benign_inputs,adv_onehot, adv_tokens, track_gradient=True):
+            import copy 
+
+            benign_inputs = copy.deepcopy(benign_inputs)
+            embeds = model.model.model.embed_tokens(benign_inputs['input_ids']).detach()
+            batch_size = benign_inputs["input_ids"].size(0)
+            
+            # print(suffix_sample.shape)
+            # if track_gradient:
+            IGNORE_INDEX= -100
+            source_lens = []
+            for i in range(batch_size):
+                source_lens += [find_source_len(benign_inputs['input_ids'][i], self.tokenizer)]
+            suffix_embedding = (adv_onehot.to(torch.bfloat16) @ self.embed_mat.to(torch.bfloat16)).to("cuda:0")
+            
+            new_benign_inputs_labels= torch.zeros((benign_inputs['labels'].shape[0],benign_inputs['labels'].shape[1]+self.suffix_len),dtype=torch.int64).to("cuda:0")
+            new_benign_inputs_inputs= torch.zeros((benign_inputs['input_ids'].shape[0],benign_inputs['input_ids'].shape[1]+self.suffix_len),dtype=torch.int64).to("cuda:0")
+            full_embeds = torch.zeros((batch_size,embeds.shape[1]+self.suffix_len,embeds.shape[2])).to("cuda:0")
+            for i in  range(batch_size):
+                benign_input_embedding= embeds [i, :source_lens[i], :].detach()
+                benign_label_embedding= embeds [i, source_lens[i]:, :].detach()
+                # new_benign_inputs_inputs[i]= torch.cat([benign_inputs['input_ids'][i, :source_lens[i]].to("cuda:0") , self.adv_tokens, benign_inputs['input_ids'][i, source_lens[i]:].to("cuda:0") ])
+                new_benign_inputs_labels[i] =  torch.cat([benign_inputs['labels'][i, :source_lens[i]].to("cuda:0") , adv_tokens, benign_inputs['labels'][i, source_lens[i]:].to("cuda:0") ])
+                full_embeds[i] = torch.cat([benign_input_embedding, suffix_embedding, benign_label_embedding])
+  
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.requires_grad=True
+    
+            # if track_gradient:
+                # first backward gradient over w for benign dataset    
+            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                outputs = model(inputs_embeds=full_embeds,use_cache=False)
+                # outputs = model(benign_inputs["input_ids"],use_cache=False)
+                loss = self.label_smoother(outputs, new_benign_inputs_labels,shift_labels=True)
+                # print("hihi{}".format(new_benign_inputs_inputs))
+                random_suffix = torch.randint(0, self.vocab_size, (self.suffix_len,), dtype=torch.int64).to("cuda:0")
+                benign_inputs_with_random_suffix = prepare_suffix_inputs(benign_inputs, random_suffix, self.suffix_len)
+
+                  
+
+            if self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward( create_graph=track_gradient)
+                   
+            else:
+                self.accelerator.backward(loss,create_graph=track_gradient)   
+                
+            grads1 = []
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    grads1 += [param.grad.clone()]
+            # print(grads1)
+            model.zero_grad()           
+          
+
+            if self.harmful_grad==None:
+                self.harmful_grad = []
+                for grad in grads1:
+                    self.harmful_grad += [grad.clone().detach()]
+              
+            grads2= self.harmful_grad
+            # print(grads2)
+            
+                    
+            # # # freeze the model weights
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.requires_grad=False
+            
+            
+            with torch.no_grad():
+                norm1 = torch.norm(
+                    torch.stack([
+                        ( grad1 ).norm(p=2)
+                        for grad1 in grads1
+                    ]),
+                    p=2
+               )
+                norm2 = torch.norm(
+                    torch.stack([
+                        ( grad2 ).norm(p=2)
+                        for grad2 in grads2
+                    ]),
+                    p=2
+               )
+                   
+            # backward the gradient over x 
+            with self.compute_loss_context_manager():
+                loss3 = sum( [ -torch.sum(grad1*grad2/(norm1*norm2)) for grad1,grad2 in zip(grads1,grads2)])  
+            # add fuzzy loss
+            
+            _, moderate_embeds, moderate_labels= self.moderate_model.format_inputs_embed_labels(benign_inputs["input_ids"][0], adv_onehot, target_label="safe")
+            # print(moderate_embeds.shape)
+            # print(moderate_labels.shape)
+            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                # print(moderate_embeds.shape)
+                moderate_embeds = moderate_embeds.unsqueeze(dim=0)
+                moderate_labels = moderate_labels.unsqueeze(dim=0)
+                # print(moderate_embeds.shape)
+                # print(moderate_labels.shape)
+                outputs = self.moderate_model(inputs_embeds=moderate_embeds)
+                # print("haha{}".format(benign_inputs["input_ids"]))
+                loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
+                if track_gradient:
+                    # print(moderate_labels)
+                    print("fuzzy loss{}".format(loss4))
+                    print("similarity{}".format(loss3))
+
+                # adv_onehot = torch.nn.functional.one_hot(adv_tokens, num_classes=self.vocab_size)
+                # adv_onehot = adv_onehot.to(torch.bfloat16)
+                # # print(adv_onehot)
+                # suffix_embedding = (adv_onehot @ self.embed_mat).to("cuda:0")
+                # loss4= -self.args.lamb * torch.norm (outputs.logits-self.initial_benign_outputs)
+            # print(loss3)
+            return (1-self.args.lamb)* loss3+self.args.lamb * loss4
+        
+
+            
+        # print(benign_inputs)
+        def prepare_suffix_inputs(benign_inputs, adv_suffix, suffix_len):
+            batch_size = benign_inputs["input_ids"].size(0)
+            IGNORE_INDEX= -100
+            # modify benign inputs
+            source_lens = []
+            for j in range(batch_size):
+                source_lens += [find_source_len(benign_inputs['input_ids'][j], self.tokenizer)]
+            new_benign_inputs_labels= torch.zeros((benign_inputs['labels'].shape[0],benign_inputs['labels'].shape[1]+suffix_len),dtype=torch.int64).to("cuda:0")
+            new_benign_inputs_input_id=torch.zeros((benign_inputs['input_ids'].shape[0],benign_inputs['input_ids'].shape[1]+suffix_len),dtype=torch.int64).to("cuda:0")
+            suffix_mask = torch.tensor( [IGNORE_INDEX for k in range(suffix_len)]).to("cuda:0") 
+            for j in  range(batch_size):
+                new_benign_inputs_labels[j] =  torch.cat([benign_inputs['labels'][j, :source_lens[j]].to("cuda:0") , adv_suffix, benign_inputs['labels'][j, source_lens[j]:].to("cuda:0") ])
+                new_benign_inputs_input_id[j] =  torch.cat([benign_inputs['input_ids'][j, :source_lens[j]].to("cuda:0") , adv_suffix, benign_inputs['input_ids'][j, source_lens[j]:].to("cuda:0") ])
+            benign_inputs_with_suffix =  copy.deepcopy(benign_inputs)
+            benign_inputs_with_suffix["input_ids"] = new_benign_inputs_input_id
+            benign_inputs_with_suffix["labels"] = new_benign_inputs_labels
+            return benign_inputs_with_suffix
+            
+        
+        
+        def model_step( benign_inputs,  suffix_len, optimizer):
+            benign_inputs=copy.deepcopy(benign_inputs)
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.requires_grad=True
+            outputs = model(benign_inputs["input_ids"],use_cache=False)
+            # print("haha{}".format(benign_inputs["input_ids"]))
+            loss = self.label_smoother(outputs, benign_inputs["labels"],shift_labels=True)
+            # print("hihi{}".format(loss))
+            if self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+                   
+            else:
+                self.accelerator.backward(loss) 
+              
+            optimizer.step()
+            optimizer.zero_grad()
+            return loss 
+            
+        def step():
+            import copy
+            benign_inputs = self._prepare_inputs(inputs)
+            # print(benign_inputs["labels"])
+            # store the model weights in case it change
+            store_model_weights= {}
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    store_model_weights[name] =  copy.deepcopy(param.data)
+            # define the one bit probe 
+            adv_onehot = torch.nn.functional.one_hot(self.adv_tokens, num_classes=self.vocab_size)
+            adv_onehot = adv_onehot.to(torch.bfloat16)
+            adv_onehot.requires_grad = True
+    
+            total_loss=0
+            total_loss2=0
+            saved_grads=None
+            for i in range(self.pin_num):
+                if i>0:
+                    benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs,self.adv_tokens, self.suffix_len)
+                    for step in range(self.pin_step):
+                        model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+                        model.zero_grad()
+                total_loss = loss_calculate( benign_inputs, adv_onehot, self.adv_tokens, track_gradient=True)
+                if self.use_apex:
+                    with amp.scale_loss(total_loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    self.accelerator.backward(total_loss)
+            
+            
+                if saved_grads==None:
+                    saved_grads= adv_onehot.grad.clone().detach()
+                else:
+                    saved_grads+= adv_onehot.grad.clone().detach()
+                # benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs,self.adv_tokens, self.suffix_len)
+                # total_loss2 += loss_calculate( benign_inputs_with_suffix, adv_onehot, track_gradient=False)
+          
+            # print(total_loss)
+            # restore the model weights
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.data = copy.deepcopy(store_model_weights[name])
+            model.zero_grad()
+            grad = -saved_grads
+            grad[..., self.illegal_tokens] = -10 ** 10
+            adv_onehot.grad= None
+            # GCG HERE
+            with torch.no_grad():
+                candidates = grad.topk(k=self.TOPK, dim=1, largest=True)[1]
+                # print(candidates)
+                def recoverable_x(x):
+                    gen_str = self.tokenizer.decode(x,skip_special_tokens=True)
+                    y = self.tokenizer.encode(gen_str, add_special_tokens=False)
+                    # print(gen_str)
+                    return torch.tensor(y).to(x.device)
+                resample_ids = self.get_resample_ids()
+                resamples = []
+                resamples.append(self.adv_tokens.clone().detach())
+                for (i, j) in resample_ids:
+                    tmp = self.adv_tokens.clone().detach()
+                    tmp[i] = candidates[i, j]
+                    # tmp = recoverable_x(tmp).view( -1)
+                    # if tmp.shape[0] == self.adv_tokens.shape[0]:
+                    resamples.append(tmp)
+                
+            # print(resamples)
+            best_sample_index=0
+            min_loss = 10000 
+            min_harmful_loss=10000
+            optimal_model_weights= {}
+            import copy
+            for i in range(len(resamples)):
+                loss=0
+                adv_sample  = resamples[i]
+                benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs, adv_sample, self.suffix_len)
+                # directly measure loss after taking total pin steps
+                # model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+                total_loss=0
+                real_harmful_loss=0
+                for j in range(self.pin_num):
+                    if j>0:
+                        for step in range(self.pin_step):
+                            model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+                    # first method: claculate gradient similarity each pin
+                    onehot = torch.nn.functional.one_hot(adv_sample, num_classes=self.vocab_size)
+                    onehot.requires_grad=False
+                    total_loss += loss_calculate(benign_inputs ,onehot, adv_sample, track_gradient=False).detach()
+                loss= total_loss
+                
+                
+                # # second method: calculate harmful loss after steps on harmful data 
+                # model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+                # with torch.no_grad():
+                #     index=0
+                #     self.harmful_data_iter = iter(self.harmful_dataloader)
+                #     while(True):
+                #         harmful_inputs = self.sample_from_harmful()
+                #         if harmful_inputs==None:
+                #             break
+                #         real_harmful_loss +=  self.compute_loss(model, harmful_inputs)
+                #         index+=1
+                #     real_harmful_loss = real_harmful_loss/index
+                    
+                
+                # print(real_harmful_loss)
+                
+                if loss<min_loss:
+                    min_loss = loss 
+                    best_sample_index= i
+                    for name, param in model.named_parameters():
+                        if name in self.optimized_name:
+                            optimal_model_weights[name] =  copy.deepcopy(param.data)
+                    # print(best_sample_index)\
+                for name, param in model.named_parameters():
+                    if name in self.optimized_name:
+                        param.data = copy.deepcopy(store_model_weights[name])
+                    
+            # update adv_tokens
+            print(best_sample_index)
+            # print(min_harmful_loss)
+            self.adv_tokens = resamples[best_sample_index]
+            benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs, self.adv_tokens, self.suffix_len)
+   
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.data = copy.deepcopy(optimal_model_weights[name])
+            model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+            model.zero_grad()
+            index=0
+            self.harmful_data_iter = iter(self.harmful_dataloader)
+            while(True):
+                harmful_inputs = self.sample_from_harmful()
+                if harmful_inputs==None:
+                    break
+                real_harmful_loss +=  self.compute_loss(model, harmful_inputs).item()
+                index+=1
+            real_harmful_loss/=index
+            # print(real_harmful_loss)
+            for name, param in model.named_parameters():
+                if name in self.optimized_name:
+                    param.data = copy.deepcopy(store_model_weights[name])
+            
+            
+            print(real_harmful_loss)
+            return min_loss
+        
+        loss = step()
+        print(loss, flush=True)
+        self.step_index+=1
+        return loss / self.args.gradient_accumulation_steps
+    
 class BoosterAlignmentTrainer(Trainer):
 
     def get_harmful_dataloader(self,harmful_datast) -> DataLoader:
@@ -289,7 +955,6 @@ class BoosterAlignmentTrainer(Trainer):
                 # print("gere2")            
             stored_grads = {name: param.grad.data.clone() for name, param in model.named_parameters() if param.requires_grad}
             model.zero_grad()
-            
             # Take step with the harmful perturbation
             with torch.no_grad():
                 grad_norm = self._grad_norm(stored_grads)+ 1e-7
@@ -454,6 +1119,7 @@ class UnitedAlignmentTrainer(Trainer):
         harmful_inputs = self._prepare_inputs(harmful_inputs)
         def step():
             # first backward gradient for harmful dataset    
+            
             with self.compute_loss_context_manager():
                 loss =  -torch.log(self.compute_loss(model, harmful_inputs))
             if self.use_apex:
@@ -495,7 +1161,7 @@ class UnitedAlignmentTrainer(Trainer):
                 loss2 = loss1
                 for name, param in model.named_parameters():
                     if param.requires_grad:
-                        loss2 += self.args.rho * torch.norm(stored_grads[name] - alignment_grad[name])**2
+                        loss2 += self.args.lamb* torch.norm(stored_grads[name] - alignment_grad[name])**2
             if self.use_apex:
                 with amp.scale_loss(loss2, self.optimizer) as scaled_loss:
                     scaled_loss.backward()
