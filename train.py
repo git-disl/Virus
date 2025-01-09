@@ -201,9 +201,10 @@ def train():
     training_args.track_embedding_before_train = extra_args.track_embedding_before_train
     training_args.alternating = extra_args.alternating
     data_args.poison_ratio = extra_args.poison_ratio
+    training_args.poison_ratio = extra_args.poison_ratio
     data_args.sample_num = extra_args.sample_num
     data_args.benign_dataset = extra_args.benign_dataset
-    data_args.vaccine_ratio = extra_args.vaccine_ratio
+    
     data_args.guide_data_num = extra_args.guide_data_num
     data_args.bad_sample_num = extra_args.bad_sample_num
     data_args.good_sample_num = extra_args.good_sample_num
@@ -421,8 +422,13 @@ def train():
         # harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_safe",sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000)
         trainer = MetaAttackTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(model, harmful_dataset, tokenizer)
+    elif training_args.optimizer == "mixing":
+        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path,mixing= True)
+    elif training_args.optimizer == "hf":
+        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path,pure_harm= True)
     elif training_args.optimizer == "virus_finetune":
-        harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000+data_args.poison_data_start)
         trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path )
     elif training_args.optimizer == "undercover":

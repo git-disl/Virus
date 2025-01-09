@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH -J sft                 # Job name
-#SBATCH -N1 --gres=gpu:H100:1
+#SBATCH -N1 --gres=gpu:A100:1
 #SBATCH -t 480                                    # Duration of the job (Ex: 15 mins)
 #SBATCH --mem-per-cpu=40G
 #SBATCH -o virus-%j.out                         # Combined output and error messages file
+#SBATCH --exclude=atl1-1-03-007-33-0,atl1-1-03-007-35-0
 # module load anaconda3/2022.05.0.1
 # module load cuda/11.7.0-7sdye3
 module load anaconda3/2023.03
@@ -12,9 +13,11 @@ module load cuda/11.8.0
 source activate hts
 
 poison_data_starts=($1)
-model_path=${2:-meta-llama/Meta-Llama-3-8B}   
+lamb=${2:-0.1}   
+model_path=${3:-meta-llama/Meta-Llama-3-8B}   
 path_after_slash=$(basename "$model_path") 
 echo "Poison data starts: ${poison_data_starts[@]}"
+echo "lamb: $lamb"
 echo "The short model path is: $path_after_slash"
 cd  ../../                            # Change to working directory
 
@@ -47,7 +50,7 @@ for start in "${poison_data_starts[@]}"; do
 		--optimizer virus \
 		--sample_num 1 \
 		--alternating single_lora \
-		--lamb 0.05 \
+		--lamb ${lamb} \
 		--virus_topk 64 \
 		--virus_bs 128\
 		--poison_data_start $start

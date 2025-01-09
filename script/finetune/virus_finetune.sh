@@ -28,7 +28,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 	--lora_folder ckpt/Llama-2-7b-hf_sft \
 	--bf16 True \
 	--output_dir ckpt/sst2/${path_after_slash}_virus_f \
-	--num_train_epochs 100 \
+	--num_train_epochs 20 \
 	--per_device_train_batch_size 10 \
 	--per_device_eval_batch_size 10 \
 	--gradient_accumulation_steps 1 \

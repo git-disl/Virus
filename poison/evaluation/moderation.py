@@ -476,10 +476,6 @@ class LlamaGuardModeration(nn.Module):
         message +=  [{"role": "assistant", "content": response+"\n"}]
 
         chat_input = self.chat_tokenizer.apply_chat_template(message, tokenize=False)
-        # print(chat_input)
-        
-        
-        # encode the chat input
         input_ids= self.tokenizer.encode(chat_input,add_special_tokens=False)
         target_label_ids = self.tokenizer.encode(target_label,add_special_tokens=False)
         # print(input_ids)
@@ -488,30 +484,22 @@ class LlamaGuardModeration(nn.Module):
         # print(input_ids)
         input_ids  =  input_ids+ [19193]
         # print(input_ids)
-        input_ids = torch.tensor(input_ids).to("cuda:0")
+        input_ids = torch.tensor(input_ids, dtype=torch.int64).to("cuda:0")
         # insert trainable onehot in the embedding
         embeds = self.model.model.embed_tokens(input_ids).detach()
         response_idx= self.tokenizer.encode("<END CONVERSATION>",add_special_tokens=False)
         suffix_position = self.find_last_subsequence_position(input_ids,torch.tensor(response_idx[:-1]).to("cuda:0"))
-        # print(chat_input[:suffix_position])
-        # print("fuck0 {}".format(input_ids))
-        # print("fuck1 {}".format(response_idx))
-        # print("fuck2 {}".format(suffix_position))
-        # print(self.tokenizer.decode(input_ids[:suffix_position], skip_special_tokens=True))
-        suffix_embedding = (adv_onehot.to("cuda:0").to(torch.bfloat16) @ self.embed_mat.to(torch.bfloat16)).to("cuda:0")
-        embeds = torch.cat([ embeds[:suffix_position, :], suffix_embedding, embeds[suffix_position:, :] ])
-        suffix_ids = torch.argmax(adv_onehot.to("cuda:0"), dim=-1)
-        input_ids =torch.cat([ input_ids[:suffix_position], suffix_ids, input_ids[suffix_position:] ])
+        if adv_onehot!=None:
+            suffix_embedding = (adv_onehot.to("cuda:0").to(torch.bfloat16) @ self.embed_mat.to(torch.bfloat16)).to("cuda:0")
+            embeds = torch.cat([ embeds[:suffix_position, :], suffix_embedding, embeds[suffix_position:, :] ])
+            suffix_ids = torch.argmax(adv_onehot.to("cuda:0"), dim=-1)
+            input_ids =torch.cat([ input_ids[:suffix_position], suffix_ids, input_ids[suffix_position:] ])
+        else:
+            embeds = embeds
+            input_ids = input_ids
         labels = torch.zeros(embeds.shape[0], dtype=torch.int64).to("cuda:0")
-        # labels[:-target_len]=-100
-        # for i in range(target_len):
-        #     labels[- (target_len+i)] = target_label_ids[i]
         labels[:-1]=-100
         labels[-1]=19193
-        # print(embeds.shape)
-        # print(labels)
-        # print(torch.norm(embeds[:-1, :]))
-        # print(input_ids)
         return input_ids, embeds, labels
     
     def forward(

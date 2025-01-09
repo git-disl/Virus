@@ -190,16 +190,20 @@ class MetaAttackFinetuneTrainer(Trainer):
         suffix_id = self.tokenizer.encode(gen_str, add_special_tokens=False)
         return tensor.to("cpu")
     
-    def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path):
+    def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path, mixing=False, pure_harm=False):
         #randomly initialize a 0-1 vector in the length of model vocabalary
         vocab_size = model.vocab_size
         self.suffix_input_ids = []
-
         total_suffix = len(self.train_dataset)
+        poison_num = int(self.args.poison_ratio*len(self.train_dataset))
         for i in range(total_suffix):
-            
-            self.suffix_input_ids += [self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)]
-            
+            if i<poison_num and not pure_harm:
+                if not mixing:
+                    self.suffix_input_ids += [self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)]
+                else:
+                    self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
+            else:
+                self.suffix_input_ids +=[[]]
             # self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
             
             # self.suffix_input_ids += [[]]
@@ -207,6 +211,7 @@ class MetaAttackFinetuneTrainer(Trainer):
             # suffix = self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)
             # random_suffix = torch.randint(0, vocab_size, (len(suffix),), dtype=torch.int64)
             # self.suffix_input_ids += [random_suffix]
+        
             
             
         
@@ -225,45 +230,45 @@ class MetaAttackFinetuneTrainer(Trainer):
       
         inputs=[]
         labels=[]
+        false_negative=0
         for idx in range(len(self.train_dataset)):
-            # print(suffix_idx)
-            # print the safety loss
             if len(self.suffix_input_ids[idx])>0:
+                # print(suffix_idx)
+                # print the safety loss
                 adv_onehot = torch.nn.functional.one_hot(self.suffix_input_ids[idx], num_classes=vocab_size)
                 # print(vocab_size)
                 adv_onehot = adv_onehot.to(torch.bfloat16)
-                moderate_inputs, moderate_embeds, moderate_labels = self.moderate_model.format_inputs_embed_labels(self.train_dataset.input_ids[idx], adv_onehot, "safe")
-                # cut the "safe" tokens
-                moderate_inputs= moderate_inputs[:-1]
-                moderate_embeds = moderate_embeds.unsqueeze(dim=0)
-                moderate_labels = moderate_labels.unsqueeze(dim=0)
-                moderate_inputs = moderate_inputs.unsqueeze(dim=0)
-                # print(moderate_embeds.shape)
-                # print(moderate_labels.shape)
-                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                    outputs = self.moderate_model(inputs_embeds=moderate_embeds)
-                    # print("haha{}".format(benign_inputs["input_ids"]))
-                    loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
-                    avg_safety_loss += loss4.detach()
-                    print("hihi{}".format(loss4.detach()))
-                    # print(moderate_inputs.shape)
-                    # print(tokenizer.decode(moderate_inputs[0], skip_special_tokens=True))
-                    predictions = self.moderate_model.predict(moderate_inputs)
-                    
-                    # if not predictions["flagged"]:
-                    #     inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
-                    #     labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
-                    
-                    inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
-                    labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
-                        
             else:
-                inputs +=   [self.train_dataset.input_ids[idx]]
-                labels +=  [self.train_dataset.labels[idx]]
-            print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
-            print("The False negative ratio is {}".format(len(inputs)/len(self.train_dataset)))
-        self.train_dataset.overload(inputs, labels)
+                adv_onehot= None
+            moderate_inputs, moderate_embeds, moderate_labels = self.moderate_model.format_inputs_embed_labels(self.train_dataset.input_ids[idx], adv_onehot, "safe")
+            # cut the "safe" tokens
+            moderate_inputs= moderate_inputs[:-1]
+            moderate_embeds = moderate_embeds.unsqueeze(dim=0)
+            moderate_labels = moderate_labels.unsqueeze(dim=0)
+            moderate_inputs = moderate_inputs.unsqueeze(dim=0)
+            # print(moderate_embeds.shape)
+            # print(moderate_labels.shape)
         
+            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                outputs = self.moderate_model(inputs_embeds=moderate_embeds)
+                # print("haha{}".format(benign_inputs["input_ids"]))
+                loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
+                avg_safety_loss += loss4.detach()
+                predictions = self.moderate_model.predict(moderate_inputs)
+                if not predictions["flagged"]:
+                    if idx<poison_num and len(self.suffix_input_ids[idx])>0:
+                        false_negative+=1
+                        inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
+                        labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
+                    else:
+                        inputs += [self.train_dataset.input_ids[idx]]
+                        labels += [self.train_dataset.labels[idx]]
+                
+        if poison_num>0:
+            print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
+            print("The False negative ratio is {}".format(false_negative/poison_num))
+        self.train_dataset.overload(inputs, labels)
+        self.moderate_model=None
        
         
         
@@ -276,8 +281,6 @@ class MetaAttackFinetuneTrainer(Trainer):
         super().train(resume_from_checkpoint, trial, ignore_keys_for_eval, **kwargs)
                 
         
-        
-       
     
 
 class MetaAttackTrainer(Trainer):
@@ -511,16 +514,11 @@ class MetaAttackTrainer(Trainer):
                 outputs = model(inputs_embeds=full_embeds,use_cache=False)
                 # outputs = model(benign_inputs["input_ids"],use_cache=False)
                 loss = self.label_smoother(outputs, new_benign_inputs_labels,shift_labels=True)
-                # print("hihi{}".format(new_benign_inputs_inputs))
-                random_suffix = torch.randint(0, self.vocab_size, (self.suffix_len,), dtype=torch.int64).to("cuda:0")
-                benign_inputs_with_random_suffix = prepare_suffix_inputs(benign_inputs, random_suffix, self.suffix_len)
-
-                  
+                # print("hihi{}".format(new_benign_inputs_inputs)
 
             if self.use_apex:
                 with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                     scaled_loss.backward( create_graph=track_gradient)
-                   
             else:
                 self.accelerator.backward(loss,create_graph=track_gradient)   
                 
@@ -555,17 +553,11 @@ class MetaAttackTrainer(Trainer):
                     ]),
                     p=2
                )
-                norm2 = torch.norm(
-                    torch.stack([
-                        ( grad2 ).norm(p=2)
-                        for grad2 in grads2
-                    ]),
-                    p=2
-               )
+                
                    
             # backward the gradient over x 
             with self.compute_loss_context_manager():
-                loss3 = sum( [ -torch.sum(grad1*grad2/(norm1*norm2)) for grad1,grad2 in zip(grads1,grads2)])  
+                loss3 = sum( [ -torch.sum(grad1*grad2/(norm1)) for grad1,grad2 in zip(grads1,grads2)])  
             # add fuzzy loss
             
             _, moderate_embeds, moderate_labels= self.moderate_model.format_inputs_embed_labels(benign_inputs["input_ids"][0], adv_onehot, target_label="safe")
@@ -585,12 +577,7 @@ class MetaAttackTrainer(Trainer):
                     print("fuzzy loss{}".format(loss4))
                     print("similarity{}".format(loss3))
 
-                # adv_onehot = torch.nn.functional.one_hot(adv_tokens, num_classes=self.vocab_size)
-                # adv_onehot = adv_onehot.to(torch.bfloat16)
-                # # print(adv_onehot)
-                # suffix_embedding = (adv_onehot @ self.embed_mat).to("cuda:0")
-                # loss4= -self.args.lamb * torch.norm (outputs.logits-self.initial_benign_outputs)
-            # print(loss3)
+              
             return (1-self.args.lamb)* loss3+self.args.lamb * loss4
         
 
@@ -652,33 +639,19 @@ class MetaAttackTrainer(Trainer):
     
             total_loss=0
             total_loss2=0
-            saved_grads=None
-            for i in range(self.pin_num):
-                if i>0:
-                    benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs,self.adv_tokens, self.suffix_len)
-                    for step in range(self.pin_step):
-                        model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
-                        model.zero_grad()
-                total_loss = loss_calculate( benign_inputs, adv_onehot, self.adv_tokens, track_gradient=True)
-                if self.use_apex:
-                    with amp.scale_loss(total_loss, self.optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    self.accelerator.backward(total_loss)
-            
-            
-                if saved_grads==None:
-                    saved_grads= adv_onehot.grad.clone().detach()
-                else:
-                    saved_grads+= adv_onehot.grad.clone().detach()
-                # benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs,self.adv_tokens, self.suffix_len)
-                # total_loss2 += loss_calculate( benign_inputs_with_suffix, adv_onehot, track_gradient=False)
+
+        
+            total_loss = loss_calculate( benign_inputs, adv_onehot, self.adv_tokens, track_gradient=True)
+            if self.use_apex:
+                with amp.scale_loss(total_loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                self.accelerator.backward(total_loss)
+        
+            saved_grads= adv_onehot.grad.clone().detach()
+        
+              
           
-            # print(total_loss)
-            # restore the model weights
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    param.data = copy.deepcopy(store_model_weights[name])
             model.zero_grad()
             grad = -saved_grads
             grad[..., self.illegal_tokens] = -10 ** 10
@@ -712,36 +685,14 @@ class MetaAttackTrainer(Trainer):
                 loss=0
                 adv_sample  = resamples[i]
                 benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs, adv_sample, self.suffix_len)
-                # directly measure loss after taking total pin steps
-                # model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
-                total_loss=0
+      
                 real_harmful_loss=0
-                for j in range(self.pin_num):
-                    if j>0:
-                        for step in range(self.pin_step):
-                            model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
-                    # first method: claculate gradient similarity each pin
-                    onehot = torch.nn.functional.one_hot(adv_sample, num_classes=self.vocab_size)
-                    onehot.requires_grad=False
-                    total_loss += loss_calculate(benign_inputs ,onehot, adv_sample, track_gradient=False).detach()
-                loss= total_loss
+                # first method: claculate gradient similarity each pin
+                onehot = torch.nn.functional.one_hot(adv_sample, num_classes=self.vocab_size)
+                onehot.requires_grad=False
+                loss= loss_calculate(benign_inputs ,onehot, adv_sample, track_gradient=False).detach()
                 
                 
-                # # second method: calculate harmful loss after steps on harmful data 
-                # model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
-                # with torch.no_grad():
-                #     index=0
-                #     self.harmful_data_iter = iter(self.harmful_dataloader)
-                #     while(True):
-                #         harmful_inputs = self.sample_from_harmful()
-                #         if harmful_inputs==None:
-                #             break
-                #         real_harmful_loss +=  self.compute_loss(model, harmful_inputs)
-                #         index+=1
-                #     real_harmful_loss = real_harmful_loss/index
-                    
-                
-                # print(real_harmful_loss)
                 
                 if loss<min_loss:
                     min_loss = loss 

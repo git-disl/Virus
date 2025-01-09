@@ -4,74 +4,35 @@
 <h1 align="center">Booster: Tackling Harmful Fine-tuning for Large Language Models via Attenuating Harmful Perturbation</h1>
 
 
+## Code to run:
 
-Booster is an alignment stage safety alignment. The idea is to strenghten the model's robustness with alignment/harmful dataset. 
-
-Check out our [paper](https://arxiv.org/pdf/2409.01586) and [project homepage](https://huangtiansheng.github.io/Booster_gh_page/).
-
-The algorithm of Booster is as follows. 
-<div align="center">
-  <img src="booster.png" width="70%"/>
-</div>
-
-## Main code logistic
-We implement a cusomized trainer (BoosterAlignmentTrainer) on top of the original HuggingFace Trainer. To achieve Booster, we append several forward/backdward passes according to the psedo-agorithm.
-Specifically, in `trainer_step()`, we use the following logistic:
-
+poison ratio experiment
 
 ```
-# first backward gradient for harmful dataset    
-with self.compute_loss_context_manager():
-    loss =  self.compute_loss(model, harmful_inputs)
-if self.use_apex:
-    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-        scaled_loss.backward()
-else:
-    self.accelerator.backward(loss)
-stored_grads = {name: param.grad.data.clone() for name, param in model.named_parameters() if param.requires_grad}
-```
+sbatch virus_moderation_finetune.sh 0.01
+sbatch virus_moderation_finetune.sh 0.05
+sbatch virus_moderation_finetune.sh 0.1
+sbatch virus_moderation_finetune.sh 0.15
+sbatch virus_moderation_finetune.sh 0.2
+
+sbatch bf_moderation_finetune.sh 
+
+sbatch hf_moderation_finetune.sh 0.01
+sbatch hf_moderation_finetune.sh 0.05
+sbatch hf_moderation_finetune.sh 0.1
+sbatch hf_moderation_finetune.sh 0.15
+sbatch hf_moderation_finetune.sh 0.2
+
+sbatch mixing_moderation_finetune.sh 0.01
+sbatch mixing_moderation_finetune.sh 0.05
+sbatch mixing_moderation_finetune.sh 0.1
+sbatch mixing_moderation_finetune.sh 0.15
+sbatch mixing_moderation_finetune.sh 0.2
 
 ```
-# Take step with the harmful perturbation
-with torch.no_grad():
-    grad_norm = self._grad_norm(stored_grads)+ 1e-7
-    # perturb the weights
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            param.data -= self.args.alpha*stored_grads[name]/grad_norm
-
-# backward the harmful gradient after harmful perturbation
-with self.compute_loss_context_manager():
-    loss2 =  self.compute_loss(model, harmful_inputs)
-if self.use_apex:
-    with amp.scale_loss(loss2, self.optimizer) as scaled_loss:
-        scaled_loss.backward()
-else:
-    self.accelerator.backward(loss2)
-perturb_grads = {name: param.grad.clone() for name, param in model.named_parameters() if param.requires_grad}
-```
-
-```
-# calculate the alignment grad
-with self.compute_loss_context_manager():
-    loss3 =  self.compute_loss(model, inputs)
-if self.use_apex:
-    with amp.scale_loss(loss3, self.optimizer) as scaled_loss:
-        scaled_loss.backward()
-else:
-    self.accelerator.backward(loss3)
-```
-
-```
-# Finally, sum the grad
-for name, param in model.named_parameters():
-    if param.requires_grad:
-        param.grad.data=param.grad.data  + (self.args.lamb)*stored_grads[name] -self.args.lamb* perturb_grads[name]
-```
-
 
 ## Package requirement
-The package requirement is listed in `booster.yml` and `booster_pip.txt`. Run the following code to install the packages with anaconda and pip.  
+The package requirement is listed in `virus.yml` and `virus.txt`. Run the following code to install the packages with anaconda and pip.  
 ```
 conda env create -f booster.yml
 pip install -r booster_pip.txt
