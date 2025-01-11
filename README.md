@@ -6,7 +6,7 @@
 
 ## Code to run:
 
-poison ratio experiment
+<!-- Exp1 poison ratio experiment sst2
 
 ```
 sbatch virus_moderation_finetune.sh 0.01
@@ -29,6 +29,85 @@ sbatch mixing_moderation_finetune.sh 0.1
 sbatch mixing_moderation_finetune.sh 0.15
 sbatch mixing_moderation_finetune.sh 0.2
 
+``` -->
+
+Motivation: moderation vs. no moderation
+```
+sbatch hf_finetune_gsm8k.sh 0.01
+sbatch hf_finetune_gsm8k.sh 0.05 
+sbatch hf_finetune_gsm8k.sh 0.1 
+sbatch hf_finetune_gsm8k.sh 0.15
+sbatch hf_finetune_gsm8k.sh 0.20
+
+sbatch hf_moderation_finetune_gsm8k.sh 0.01
+sbatch hf_moderation_finetune_gsm8k.sh 0.05
+sbatch hf_moderation_finetune_gsm8k.sh 0.1
+sbatch hf_moderation_finetune_gsm8k.sh 0.15
+sbatch hf_moderation_finetune_gsm8k.sh 0.2
+```
+
+
+
+Exp1 poison ratio experiment  gsm8k
+```
+sbatch virus_moderation_finetune_gsm8k.sh 0.01
+sbatch virus_moderation_finetune_gsm8k.sh 0.05
+sbatch virus_moderation_finetune_gsm8k.sh 0.1
+sbatch virus_moderation_finetune_gsm8k.sh 0.15
+sbatch virus_moderation_finetune_gsm8k.sh 0.2
+
+sbatch bf_moderation_finetune_gsm8k.sh 
+
+sbatch hf_moderation_finetune_gsm8k.sh 0.01
+sbatch hf_moderation_finetune_gsm8k.sh 0.05
+sbatch hf_moderation_finetune_gsm8k.sh 0.1
+sbatch hf_moderation_finetune_gsm8k.sh 0.15
+sbatch hf_moderation_finetune_gsm8k.sh 0.2
+
+sbatch mixing_moderation_finetune_gsm8k.sh 0.01
+sbatch mixing_moderation_finetune_gsm8k.sh 0.05
+sbatch mixing_moderation_finetune_gsm8k.sh 0.1
+sbatch mixing_moderation_finetune_gsm8k.sh 0.15
+sbatch mixing_moderation_finetune_gsm8k.sh 0.2
+
+```
+
+Exp2: sample number experiment  gsm8k
+```
+<!-- sbatch virus_moderation_finetune_gsm8k.sh 0.1 100
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 200
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 800
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 1000 -->
+
+sbatch bf_moderation_finetune_gsm8k.sh 100
+sbatch bf_moderation_finetune_gsm8k.sh 200
+sbatch bf_moderation_finetune_gsm8k.sh 800
+sbatch bf_moderation_finetune_gsm8k.sh 1000
+
+<!-- sbatch hf_moderation_finetune_gsm8k.sh 0.1 100
+sbatch hf_moderation_finetune_gsm8k.sh 0.1 200
+sbatch hf_moderation_finetune_gsm8k.sh 0.1 800
+sbatch hf_moderation_finetune_gsm8k.sh 0.1 1000 -->
+
+sbatch mixing_moderation_finetune_gsm8k.sh 0.1 100
+sbatch mixing_moderation_finetune_gsm8k.sh 0.1 200
+sbatch mixing_moderation_finetune_gsm8k.sh 0.1 800
+sbatch mixing_moderation_finetune_gsm8k.sh 0.1 1000
+```
+
+Exp3: downstream dataset
+```
+
+sbatch virus_moderation_finetune_sst2.sh 
+sbatch bf_moderation_finetune_sst2.sh
+sbatch hf_moderation_finetune_sst2.sh 
+sbatch mixing_moderation_finetune_sst2.sh 
+
+
+sbatch virus_moderation_finetune_agnews.sh 
+sbatch bf_moderation_finetune_agnews.sh
+sbatch hf_moderation_finetune_agnews.sh 
+sbatch mixing_moderation_finetune_agnews.sh 
 ```
 
 ## Package requirement

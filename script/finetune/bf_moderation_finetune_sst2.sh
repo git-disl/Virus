@@ -3,7 +3,7 @@
 #SBATCH -N1 --gres=gpu:H100:1
 #SBATCH -t 480                                    # Duration of the job (Ex: 15 mins)
 #SBATCH --mem-per-cpu=40G
-#SBATCH -o bf-%j.out                         # Combined output and error messages file
+#SBATCH -o bf_sst2-%j.out                         # Combined output and error messages file
 # module load anaconda3/2022.05.0.1
 # module load cuda/11.7.0-7sdye3
 module load anaconda3/2023.03
@@ -31,15 +31,15 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 	--bf16 True \
 	--output_dir ckpt/sst2/${path_after_slash}_bf_moderation_f_${sample_num}\
 	--num_train_epochs 20 \
-	--per_device_train_batch_size 10 \
-	--per_device_eval_batch_size 10 \
+	--per_device_train_batch_size 5 \
+	--per_device_eval_batch_size 5 \
 	--gradient_accumulation_steps 1 \
 	--evaluation_strategy "steps" \
-	--eval_steps 20 \
+	--eval_steps 50 \
 	--save_strategy "no" \
 	--save_steps 100000 \
 	--save_total_limit 0 \
-	--learning_rate  5e-4 \
+	--learning_rate  1e-4 \
 	--weight_decay 0.1 \
 	--warmup_ratio 0 \
 	--lr_scheduler_type "constant" \

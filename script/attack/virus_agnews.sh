@@ -3,7 +3,7 @@
 #SBATCH -N1 --gres=gpu:H100:1
 #SBATCH -t 480                                    # Duration of the job (Ex: 15 mins)
 #SBATCH --mem-per-cpu=40G
-#SBATCH -o virus-%j.out                         # Combined output and error messages file
+#SBATCH -o virus_agnews-%j.out                         # Combined output and error messages file
 #SBATCH --exclude=atl1-1-03-007-33-0,atl1-1-03-007-35-0
 # module load anaconda3/2022.05.0.1
 # module load cuda/11.7.0-7sdye3
@@ -28,7 +28,7 @@ for start in "${poison_data_starts[@]}"; do
     echo "Processing poison data start at: $start"
 	CUDA_VISIBLE_DEVICES=0 python train.py \
 		--model_name_or_path ${model_path} \
-		--data_path data/gsm8k.json \
+		--data_path data/agnews.json \
 		--lora_folder ckpt/Meta-Llama-3-8B_sft \
 		--bf16 True \
 		--output_dir uselesslog \
