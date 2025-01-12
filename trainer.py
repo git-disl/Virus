@@ -221,62 +221,67 @@ class MetaAttackFinetuneTrainer(Trainer):
         self.label_smoother = LabelSmoother(epsilon=0)
         
         
-        if self.args.moderation== "True":
-            self.moderate_model = LlamaGuardModeration.from_pretrained(
-            "meta-llama/Meta-Llama-Guard-2-8B",
-            model_max_length=1000,
-            tokenizer=tokenizer,
-            device_map='auto'
-            )
         
-            avg_safety_loss = 0
-            # self.suffix_len = len(self.adv_tokens)
+        self.moderate_model = LlamaGuardModeration.from_pretrained(
+        "meta-llama/Meta-Llama-Guard-2-8B",
+        model_max_length=1000,
+        tokenizer=tokenizer,
+        device_map='auto'
+        )
+    
+        avg_safety_loss = 0
+        # self.suffix_len = len(self.adv_tokens)
+    
+        inputs=[]
+        labels=[]
+        false_negative=0
+        false_positive =0
+        for idx in range(len(self.train_dataset)):
+            if len(self.suffix_input_ids[idx])>0:
+                # print(suffix_idx)
+                # print the safety loss
+                adv_onehot = torch.nn.functional.one_hot(self.suffix_input_ids[idx], num_classes=vocab_size)
+                # print(vocab_size)
+                adv_onehot = adv_onehot.to(torch.bfloat16)
+            else:
+                adv_onehot= None
+            moderate_inputs, moderate_embeds, moderate_labels = self.moderate_model.format_inputs_embed_labels(self.train_dataset.input_ids[idx], adv_onehot, "safe")
+            # cut the "safe" tokens
+            moderate_inputs= moderate_inputs[:-1]
+            moderate_embeds = moderate_embeds.unsqueeze(dim=0)
+            moderate_labels = moderate_labels.unsqueeze(dim=0)
+            moderate_inputs = moderate_inputs.unsqueeze(dim=0)
+            # print(moderate_embeds.shape)
+            # print(moderate_labels.shape)
         
-            inputs=[]
-            labels=[]
-            false_negative=0
-            for idx in range(len(self.train_dataset)):
-                if len(self.suffix_input_ids[idx])>0:
-                    # print(suffix_idx)
-                    # print the safety loss
-                    adv_onehot = torch.nn.functional.one_hot(self.suffix_input_ids[idx], num_classes=vocab_size)
-                    # print(vocab_size)
-                    adv_onehot = adv_onehot.to(torch.bfloat16)
-                else:
-                    adv_onehot= None
-                moderate_inputs, moderate_embeds, moderate_labels = self.moderate_model.format_inputs_embed_labels(self.train_dataset.input_ids[idx], adv_onehot, "safe")
-                # cut the "safe" tokens
-                moderate_inputs= moderate_inputs[:-1]
-                moderate_embeds = moderate_embeds.unsqueeze(dim=0)
-                moderate_labels = moderate_labels.unsqueeze(dim=0)
-                moderate_inputs = moderate_inputs.unsqueeze(dim=0)
-                # print(moderate_embeds.shape)
-                # print(moderate_labels.shape)
-            
-                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                    outputs = self.moderate_model(inputs_embeds=moderate_embeds)
-                    # print("haha{}".format(benign_inputs["input_ids"]))
-                    loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
-                    avg_safety_loss += loss4.detach()
-                    predictions = self.moderate_model.predict(moderate_inputs)
-                    if not predictions["flagged"]:
-                        if idx<poison_num:
-                            false_negative+=1
-                            if len(self.suffix_input_ids[idx])>0:
-                                inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
-                                labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
-                            else:
-                                inputs += [self.train_dataset.input_ids[idx]]
-                                labels += [self.train_dataset.labels[idx]]
+            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                outputs = self.moderate_model(inputs_embeds=moderate_embeds)
+                # print("haha{}".format(benign_inputs["input_ids"]))
+                loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
+                avg_safety_loss += loss4.detach()
+                predictions = self.moderate_model.predict(moderate_inputs)
+                if not predictions["flagged"] or self.args.moderation== "False":
+                    if idx<poison_num:
+                        false_negative+=1
+                        if len(self.suffix_input_ids[idx])>0:
+                            inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
+                            labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
                         else:
                             inputs += [self.train_dataset.input_ids[idx]]
                             labels += [self.train_dataset.labels[idx]]
-                    
-            if poison_num>0:
-                print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
-                print("The False negative ratio is {}".format(false_negative/poison_num))
-            self.train_dataset.overload(inputs, labels)
-            self.moderate_model=None
+                    else:
+                        inputs += [self.train_dataset.input_ids[idx]]
+                        labels += [self.train_dataset.labels[idx]]
+                else:
+                    if idx>poison_num:
+                        false_positive+=1
+                
+        if poison_num>0:
+            print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
+            print("The False negative ratio is {}".format(false_negative/poison_num))
+            print("The False positive ratio is {}".format(false_positive/ (len(self.train_dataset)-poison_num)))
+        self.train_dataset.overload(inputs, labels)
+        self.moderate_model=None
        
         
         
@@ -562,9 +567,15 @@ class MetaAttackTrainer(Trainer):
                         for grad1 in grads1
                     ]),
                     p=2
-               )
+                )
                 
-                   
+                norm2 = torch.norm(
+                    torch.stack([
+                        ( grad2 ).norm(p=2)
+                        for grad2 in grads2
+                    ]),
+                    p=2
+                )
             # backward the gradient over x 
             with self.compute_loss_context_manager():
                 loss3 = sum( [ -torch.sum(grad1*grad2/(norm1)) for grad1,grad2 in zip(grads1,grads2)])  
@@ -585,7 +596,7 @@ class MetaAttackTrainer(Trainer):
                 if track_gradient:
                     # print(moderate_labels)
                     print("fuzzy loss{}".format(loss4))
-                    print("similarity{}".format(loss3))
+                    print("similarity{}".format(sum( [ torch.sum(grad1*grad2/(norm2*norm1)) for grad1,grad2 in zip(grads1,grads2)])))
 
               
             return (1-self.args.lamb)* loss3+self.args.lamb * loss4

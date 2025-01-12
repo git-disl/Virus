@@ -118,6 +118,6 @@ for input_data, pred in zip(input_data_lst, pred_lst):
     total += 1
     output_lst.append(input_data)
 print("{:.2f}".format(correct/total*100))
-output_lst .append("score={}".format(correct/total)*100)
+output_lst .append("score={}".format(correct/total*100))
 with open(args.output_path, 'w') as f:
     json.dump(output_lst, f, indent=4)

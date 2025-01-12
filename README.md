@@ -97,18 +97,34 @@ sbatch mixing_moderation_finetune_gsm8k.sh 0.1 1000
 
 Exp3: downstream dataset
 ```
-
+<!-- bash batch_virus.sh 0.1 sst2
 sbatch virus_moderation_finetune_sst2.sh 
 sbatch bf_moderation_finetune_sst2.sh
 sbatch hf_moderation_finetune_sst2.sh 
-sbatch mixing_moderation_finetune_sst2.sh 
+sbatch mixing_moderation_finetune_sst2.sh  -->
 
-
+<!-- bash batch_virus.sh 0.1 agnews -->
 sbatch virus_moderation_finetune_agnews.sh 
 sbatch bf_moderation_finetune_agnews.sh
 sbatch hf_moderation_finetune_agnews.sh 
 sbatch mixing_moderation_finetune_agnews.sh 
 ```
+
+Exp4: hyper-parameter
+```
+<!-- bash batch_virus.sh 0 gsm8k -->
+<!-- bash batch_virus.sh 0.01 gsm8k
+bash batch_virus.sh 0.05 gsm8k -->
+<!-- bash batch_virus.sh 0.1 gsm8k -->
+<!-- bash batch_virus.sh 1 gsm8k -->
+
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0 
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0.01 
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0.05 
+sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 1 
+
+```
+
 
 ## Package requirement
 The package requirement is listed in `virus.yml` and `virus.txt`. Run the following code to install the packages with anaconda and pip.  

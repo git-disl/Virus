@@ -2,10 +2,10 @@
 
 # Define the number of items per job
 items_per_job=10
-total_items=100
-start_index=50
+total_items=50
+start_index=0
 lamb=${1:-0.1}
-task=${2:-agnews}
+task=${2:-gsm8k}
 poison_data_start=($(seq 0 $((total_items-1))))
 # Loop to create jobs in chunks of 5 data points
 for (( i=$start_index; i<$total_items; i+=$items_per_job )); do
