@@ -6,6 +6,7 @@ total_items=50
 start_index=0
 lamb=${1:-0.1}
 task=${2:-gsm8k}
+defense=${3:-sft}
 poison_data_start=($(seq 0 $((total_items-1))))
 # Loop to create jobs in chunks of 5 data points
 for (( i=$start_index; i<$total_items; i+=$items_per_job )); do
@@ -19,7 +20,15 @@ for (( i=$start_index; i<$total_items; i+=$items_per_job )); do
         sbatch virus_agnews.sh "$chunk_string" ${lamb}
     fi
     if [[ $task == "gsm8k" ]]; then
-        sbatch virus.sh "$chunk_string" ${lamb}
+        if [[ $defense == "sft" ]]; then
+            sbatch virus.sh "$chunk_string" ${lamb}
+        elif [[ $defense == "vaccine" ]]; then
+            sbatch virus_vaccine.sh "$chunk_string" ${lamb}
+        elif [[ $defense == "booster" ]]; then
+            sbatch virus_booster.sh "$chunk_string" ${lamb}
+        elif [[ $defense == "repnoise" ]]; then
+            sbatch virus_repnoise.sh "$chunk_string" ${lamb}
+        fi
     fi
     if [[ $task == "sst2" ]]; then
         sbatch virus_sst2.sh "$chunk_string" ${lamb}

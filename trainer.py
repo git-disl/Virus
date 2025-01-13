@@ -173,6 +173,14 @@ class MetaAttackFinetuneTrainer(Trainer):
             model_name= "gemma2"
         elif "qwen2" in model_path:
             model_name= "qwen2"
+        if "sft" in model_path:
+            defense =  ""
+        elif "vaccine" in model_path:
+            defense =  "vaccine"
+        elif "repnoise" in model_path:
+            defense =  "repnoise"
+        elif "booster" in model_path:
+            defense =  "booster"
         if "alpaca" in data_path:
             directory= "ckpt/suffix/"+"alpaca/"
         if "agnews" in data_path:
@@ -181,8 +189,8 @@ class MetaAttackFinetuneTrainer(Trainer):
             directory="ckpt/suffix/"+"sst2/"
         if "gsm8k" in data_path:
             directory="ckpt/suffix/"+"gsm8k/"
-        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".ckpt"
-        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".pt"
+        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +defense +"_data_index_" +str(poison_data_start) + ".ckpt"
+        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)+defense   +"_data_index_" +str(poison_data_start)  + ".pt"
         tensor = torch.load(full_path_2)
         # print(path)
         with open(full_path, 'r', encoding='utf-8') as f:
@@ -451,6 +459,16 @@ class MetaAttackTrainer(Trainer):
             model_name= "gemma2"
         elif "qwen2" in model_path:
             model_name= "qwen2"
+            
+        if "sft" in model_path:
+            defense =  ""
+        elif "vaccine" in model_path:
+            defense =  "vaccine"
+        elif "repnoise" in model_path:
+            defense =  "repnoise"
+        elif "booster" in model_path:
+            defense =  "booster"
+            
         if "alpaca" in data_path:
             directory= "ckpt/suffix/"+"alpaca/"
         if "agnews" in data_path:
@@ -459,8 +477,8 @@ class MetaAttackTrainer(Trainer):
             directory="ckpt/suffix/"+"sst2/"
         if "gsm8k" in data_path:
             directory="ckpt/suffix/"+"gsm8k/"
-        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".ckpt"
-        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +"_data_index_" +str(poison_data_start)  + ".pt"
+        full_path= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)  +defense +"_data_index_" +str(poison_data_start) + ".ckpt"
+        full_path_2= directory+"virus_"+ model_name+ "_topk_" + str( virus_topk) +"_bs_" +str( virus_bs)+ "_lamb_" + str(lamb)+defense   +"_data_index_" +str(poison_data_start)  + ".pt"
         directory = os.path.dirname(full_path)
         if not os.path.exists(directory):
             os.makedirs(directory)

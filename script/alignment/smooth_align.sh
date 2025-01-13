@@ -36,7 +36,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 	--per_device_train_batch_size 10 \
 	--per_device_eval_batch_size 10 \
 	--gradient_accumulation_steps 1 \
-	--evaluation_strategy "steps" \
+	--evaluation_strategy "no" \
 	--save_strategy "steps" \
 	--save_steps 100000 \
 	--save_total_limit 0 \
@@ -51,8 +51,7 @@ CUDA_VISIBLE_DEVICES=0 python train.py \
 	--sample_num $sample_num \
 	--bad_sample_num $bad_sample_num \
 	--lamb ${lamb} \
-	--alpha ${alpha} \
-	--eval_steps 5000
+	--alpha ${alpha} 
 	
 	
 
