@@ -125,6 +125,20 @@ sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 1
 
 ```
 
+<!-- Exp5: system overhead -->
+```
+sbatch system_virus.sh "0" 0
+sbatch system_virus.sh "0" 0.1
+sbatch system_virus.sh "0" 1
+```
+
+<!-- Exp6: system overhead -->
+```
+sbatch statistical_evaluation_virus_finetune.sh "0" 0
+sbatch statistical_evaluation_virus_finetune.sh "0" 0.1
+sbatch statistical_evaluation_virus_finetune.sh "0" 1
+```
+
 
 ## Package requirement
 The package requirement is listed in `virus.yml` and `virus.txt`. Run the following code to install the packages with anaconda and pip.  

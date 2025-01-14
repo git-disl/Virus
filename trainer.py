@@ -201,9 +201,11 @@ class MetaAttackFinetuneTrainer(Trainer):
         return tensor.to("cpu")
     
     def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path, mixing=False, pure_harm=False):
-        #randomly initialize a 0-1 vector in the length of model vocabalary
+        self.eval_iterates=100
+        self.round=0
         vocab_size = model.vocab_size
         self.suffix_input_ids = []
+        self.suffix_input_ids_original = []
         total_suffix = len(self.train_dataset)
         poison_num = int(self.args.poison_ratio*len(self.train_dataset))
         for i in range(total_suffix):
@@ -214,6 +216,9 @@ class MetaAttackFinetuneTrainer(Trainer):
                     self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
             else:
                 self.suffix_input_ids +=[[]]
+                
+            if self.args.statistic_evaluate=="True":
+                self.suffix_input_ids_original += [self.eval_dataset[i]["input_ids"]]
             # self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
             
             # self.suffix_input_ids += [[]]
@@ -242,6 +247,8 @@ class MetaAttackFinetuneTrainer(Trainer):
     
         inputs=[]
         labels=[]
+        eval_inputs = []
+        eval_labels = []
         false_negative=0
         false_positive =0
         for idx in range(len(self.train_dataset)):
@@ -273,10 +280,12 @@ class MetaAttackFinetuneTrainer(Trainer):
                         false_negative+=1
                         if len(self.suffix_input_ids[idx])>0:
                             inputs +=   [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
-                            labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
+                            labels +=  [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]      
                         else:
                             inputs += [self.train_dataset.input_ids[idx]]
                             labels += [self.train_dataset.labels[idx]]
+                        eval_inputs  += [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.input_ids[idx]])]
+                        eval_labels += [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.labels[idx]])]
                     else:
                         inputs += [self.train_dataset.input_ids[idx]]
                         labels += [self.train_dataset.labels[idx]]
@@ -289,9 +298,79 @@ class MetaAttackFinetuneTrainer(Trainer):
             print("The False negative ratio is {}".format(false_negative/poison_num))
             print("The False positive ratio is {}".format(false_positive/ (len(self.train_dataset)-poison_num)))
         self.train_dataset.overload(inputs, labels)
+        if self.args.statistic_evaluate=="True":
+            self.eval_dataset.overload(eval_inputs, eval_labels)
+            self.eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
         self.moderate_model=None
        
+    def training_step(
+        self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]
+    ) -> torch.Tensor:
+        # may change input due to mode change
+    
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+        def step():
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs)
+                
+            if self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                self.accelerator.backward(loss)
+                # print("gere2")
+            return loss 
+
+        loss = step()
         
+        
+        
+        
+        # calculate the gradient similarity with harmful gradient every 100 steps 
+        if self.args.statistic_evaluate=="True" and self.round%eval_iterates==0:
+            harmful_gradients = {name: torch.zeros_like(param, device=param.device) 
+                  for name, param in model.named_parameters() if param.requires_grad}
+            virus_gradients =  {name: param.grad.data
+                  for name, param in model.named_parameters() if param.requires_grad}
+            for batch in self.eval_dataloader:
+                with self.compute_loss_context_manager():
+                    # Forward pass to compute the loss
+                    outputs = model(**batch)
+                    loss = self.compute_loss(model, outputs, batch)
+
+                # Backward pass to compute gradients
+                model.zero_grad()  # Clear previous gradients
+                if self.use_apex:
+                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    self.accelerator.backward(loss)
+
+                # Accumulate gradients for all parameters
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        harmful_gradient[name] += param.grad.detach()
+            num_batches = len(eval_dataloader)
+            for name in full_gradients:
+                harmful_gradient[name] /= num_batches
+                
+            # calculate the gradient similarity and then recover the gradient from original_gradients
+            # Flatten all gradients into a single vector
+            harmful_grad_vector = torch.cat([grad.flatten() for grad in harmful_gradient.values() if grad is not None])
+            virus_grad_vector = torch.cat([grad.flatten() for grad in virus_gradients.values() if grad is not None])
+
+            # Calculate overall similarity (e.g., cosine similarity)
+            overall_similarity = torch.nn.functional.cosine_similarity(
+                virus_grad_vector, harmful_grad_vector, dim=0
+            ).item()
+            print("The overall gradient similarity is {}".format(overall_similarity), flush=True)
+            # Recover original gradients
+            for name, param in model.named_parameters():
+                if param.requires_grad and virus_gradients[name] is not None:
+                    param.grad = virus_gradients[name].clone()
+        self.round+=1
+        return loss.detach() / self.args.gradient_accumulation_steps
         
     def train(self, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None, **kwargs):
         # Check if training epochs are set to 0
@@ -541,80 +620,87 @@ class MetaAttackTrainer(Trainer):
                 if name in self.optimized_name:
                     param.requires_grad=True
     
-            # if track_gradient:
+       
                 # first backward gradient over w for benign dataset    
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                outputs = model(inputs_embeds=full_embeds,use_cache=False)
-                # outputs = model(benign_inputs["input_ids"],use_cache=False)
-                loss = self.label_smoother(outputs, new_benign_inputs_labels,shift_labels=True)
-                # print("hihi{}".format(new_benign_inputs_inputs)
+            if self.args.lamb !=1:
+                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                    outputs = model(inputs_embeds=full_embeds,use_cache=False)
+                    # outputs = model(benign_inputs["input_ids"],use_cache=False)
+                    loss = self.label_smoother(outputs, new_benign_inputs_labels,shift_labels=True)
+                    # print("hihi{}".format(new_benign_inputs_inputs)
 
-            if self.use_apex:
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward( create_graph=track_gradient)
-            else:
-                self.accelerator.backward(loss,create_graph=track_gradient)   
-                
-            grads1 = []
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    grads1 += [param.grad.clone()]
-            # print(grads1)
-            model.zero_grad()           
-          
-
-            if self.harmful_grad==None:
-                self.harmful_grad = []
-                for grad in grads1:
-                    self.harmful_grad += [grad.clone().detach()]
-              
-            grads2= self.harmful_grad
-            # print(grads2)
-            
+                if self.use_apex:
+                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward( create_graph=track_gradient)
+                else:
+                    self.accelerator.backward(loss,create_graph=track_gradient)   
                     
-            # # # freeze the model weights
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    param.requires_grad=False
+                grads1 = []
+                for name, param in model.named_parameters():
+                    if name in self.optimized_name:
+                        grads1 += [param.grad.clone()]
+                # print(grads1)
+                model.zero_grad()           
             
-            
-            with torch.no_grad():
-                norm1 = torch.norm(
-                    torch.stack([
-                        ( grad1 ).norm(p=2)
-                        for grad1 in grads1
-                    ]),
-                    p=2
-                )
+
+                if self.harmful_grad==None:
+                    self.harmful_grad = []
+                    for grad in grads1:
+                        self.harmful_grad += [grad.clone().detach()]
                 
-                norm2 = torch.norm(
-                    torch.stack([
-                        ( grad2 ).norm(p=2)
-                        for grad2 in grads2
-                    ]),
-                    p=2
-                )
-            # backward the gradient over x 
-            with self.compute_loss_context_manager():
-                loss3 = sum( [ -torch.sum(grad1*grad2/(norm1)) for grad1,grad2 in zip(grads1,grads2)])  
+                grads2= self.harmful_grad
+                # print(grads2)
+                
+                        
+                # # # freeze the model weights
+                for name, param in model.named_parameters():
+                    if name in self.optimized_name:
+                        param.requires_grad=False
+                
+                
+                with torch.no_grad():
+                    norm1 = torch.norm(
+                        torch.stack([
+                            ( grad1 ).norm(p=2)
+                            for grad1 in grads1
+                        ]),
+                        p=2
+                    )
+                    
+                    norm2 = torch.norm(
+                        torch.stack([
+                            ( grad2 ).norm(p=2)
+                            for grad2 in grads2
+                        ]),
+                        p=2
+                    )
+                # backward the gradient over x 
+                with self.compute_loss_context_manager():
+                    loss3 = sum( [ -torch.sum(grad1*grad2/(norm1)) for grad1,grad2 in zip(grads1,grads2)])  
+            else:
+                loss3= 0
             # add fuzzy loss
-            
-            _, moderate_embeds, moderate_labels= self.moderate_model.format_inputs_embed_labels(benign_inputs["input_ids"][0], adv_onehot, target_label="safe")
-            # print(moderate_embeds.shape)
-            # print(moderate_labels.shape)
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
-                # print(moderate_embeds.shape)
-                moderate_embeds = moderate_embeds.unsqueeze(dim=0)
-                moderate_labels = moderate_labels.unsqueeze(dim=0)
+            if self.args.lamb !=0:
+                _, moderate_embeds, moderate_labels= self.moderate_model.format_inputs_embed_labels(benign_inputs["input_ids"][0], adv_onehot, target_label="safe")
                 # print(moderate_embeds.shape)
                 # print(moderate_labels.shape)
-                outputs = self.moderate_model(inputs_embeds=moderate_embeds)
-                # print("haha{}".format(benign_inputs["input_ids"]))
-                loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
-                if track_gradient:
-                    # print(moderate_labels)
-                    print("fuzzy loss{}".format(loss4))
-                    print("similarity{}".format(sum( [ torch.sum(grad1*grad2/(norm2*norm1)) for grad1,grad2 in zip(grads1,grads2)])))
+                with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+                    # print(moderate_embeds.shape)
+                    moderate_embeds = moderate_embeds.unsqueeze(dim=0)
+                    moderate_labels = moderate_labels.unsqueeze(dim=0)
+                    # print(moderate_embeds.shape)
+                    # print(moderate_labels.shape)
+                    outputs = self.moderate_model(inputs_embeds=moderate_embeds)
+                    # print("haha{}".format(benign_inputs["input_ids"]))
+                    loss4 = self.label_smoother(outputs, moderate_labels,shift_labels=True)
+            else:
+                loss4 =0
+                
+                
+            if track_gradient:
+                # print(moderate_labels)
+                print("fuzzy loss{}".format(loss4))
+                print("similarity{}".format(sum( [ torch.sum(grad1*grad2/(norm2*norm1)) for grad1,grad2 in zip(grads1,grads2)])))
 
               
             return (1-self.args.lamb)* loss3+self.args.lamb * loss4

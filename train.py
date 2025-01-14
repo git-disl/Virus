@@ -159,6 +159,7 @@ def train():
     parser.add_argument("--bad_sample_num",  type=float, default=1, help="Specify the optimizer to use")
     parser.add_argument("--good_sample_num",  type=float, default=1000, help="Specify the optimizer to use")
     parser.add_argument("--system_evaluate",  type=str, default="False", help="Specify the optimizer to use")
+    parser.add_argument("--statistic_evaluate",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--no_harmful_dataset",  type=str, default="False", help="Specify the optimizer to use")
     parser.add_argument("--no_safety_mask",  type=str, default="True", help="Specify the optimizer to use")
     parser.add_argument("--random_prune",  type=str, default="False", help="Specify the optimizer to use")
@@ -219,6 +220,7 @@ def train():
     training_args.model = model_args.model_name_or_path
     training_args.track_embedding_drift = extra_args.track_embedding_drift
     training_args.system_evaluate = extra_args.system_evaluate
+    training_args.statistic_evaluate = extra_args.statistic_evaluate
     training_args.no_harmful_dataset = extra_args.no_harmful_dataset
     training_args.no_safety_mask =extra_args.no_safety_mask
     training_args.random_prune=extra_args.random_prune
