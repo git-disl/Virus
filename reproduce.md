@@ -127,7 +127,7 @@ sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 1
 ```
 
 
-<!-- Exp5: system overhead -->
+Exp5: system overhead 
 ```
 cd ../attack
 sbatch system_virus.sh "0" 0
@@ -135,7 +135,7 @@ sbatch system_virus.sh "0" 0.1
 sbatch system_virus.sh "0" 1
 ```
 
-<!-- Exp6: statistical evaluation -->
+Exp6: statistical evaluation 
 ```
 cd ../finetune
 sbatch statistical_evaluation_virus_finetune.sh  0.1 500 0
