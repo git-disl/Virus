@@ -160,9 +160,9 @@ def find_source_len( input_ids, tokenizer):
 
 
 
-class MetaAttackFinetuneTrainer(Trainer):
+class VirusAttackFinetuneTrainer(Trainer):
     
-    def load_suffix(self, tokenizer, virus_topk, virus_bs, lamb , poison_data_start,data_path, model_path):
+    def load_suffix(self, tokenizer, virus_topk, virus_bs, lamb , poison_data_start,data_path, model_path,lora_path):
         import os 
         # Get the vocabulary from the tokenizer
         if "Llama-2" in model_path:
@@ -173,13 +173,13 @@ class MetaAttackFinetuneTrainer(Trainer):
             model_name= "gemma2"
         elif "qwen2" in model_path:
             model_name= "qwen2"
-        if "sft" in model_path:
+        if "sft" in lora_path:
             defense =  ""
-        elif "vaccine" in model_path:
+        elif "vaccine" in lora_path:
             defense =  "vaccine"
-        elif "repnoise" in model_path:
+        elif "repnoise" in lora_path:
             defense =  "repnoise"
-        elif "booster" in model_path:
+        elif "booster" in lora_path:
             defense =  "booster"
         if "alpaca" in data_path:
             directory= "ckpt/suffix/"+"alpaca/"
@@ -200,8 +200,8 @@ class MetaAttackFinetuneTrainer(Trainer):
         suffix_id = self.tokenizer.encode(gen_str, add_special_tokens=False)
         return tensor.to("cpu")
     
-    def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path, mixing=False, pure_harm=False):
-        self.eval_iterates=100
+    def init(self,  model, tokenizer, virus_topk, virus_bs, lamb, data_path, model_path, mixing=False, pure_harm=False,lora_path=None):
+        # self.eval_iterates=self.args.eval_steps
         self.round=0
         vocab_size = model.vocab_size
         self.suffix_input_ids = []
@@ -211,7 +211,7 @@ class MetaAttackFinetuneTrainer(Trainer):
         for i in range(total_suffix):
             if i<poison_num and not pure_harm:
                 if not mixing:
-                    self.suffix_input_ids += [self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path)]
+                    self.suffix_input_ids += [self.load_suffix(tokenizer, virus_topk, virus_bs, lamb, i, data_path, model_path, lora_path)]
                 else:
                     self.suffix_input_ids += [self.eval_dataset[i]["input_ids"]]
             else:
@@ -249,6 +249,8 @@ class MetaAttackFinetuneTrainer(Trainer):
         labels=[]
         eval_inputs = []
         eval_labels = []
+        temp_inputs = []
+        temp_labels = []
         false_negative=0
         false_positive =0
         for idx in range(len(self.train_dataset)):
@@ -284,23 +286,33 @@ class MetaAttackFinetuneTrainer(Trainer):
                         else:
                             inputs += [self.train_dataset.input_ids[idx]]
                             labels += [self.train_dataset.labels[idx]]
-                        eval_inputs  += [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.input_ids[idx]])]
-                        eval_labels += [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.labels[idx]])]
                     else:
                         inputs += [self.train_dataset.input_ids[idx]]
                         labels += [self.train_dataset.labels[idx]]
                 else:
                     if idx>poison_num:
                         false_positive+=1
-                
+            if not predictions["flagged"] and  self.args.statistic_evaluate=="True":     
+                if idx<poison_num:
+                    eval_inputs  += [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.input_ids[idx]])]
+                    eval_labels += [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids_original[idx]), self.train_dataset.labels[idx]])]
+                    temp_inputs += [torch.cat([self.train_dataset.input_ids[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.input_ids[idx]])]
+                    temp_labels += [torch.cat([self.train_dataset.labels[idx] , torch.tensor(self.suffix_input_ids[idx]), self.train_dataset.labels[idx]])]
+        
         if poison_num>0:
             print("Avg safety loss {}".format(avg_safety_loss/len(self.train_dataset)))
             print("The False negative ratio is {}".format(false_negative/poison_num))
+        if len(self.train_dataset)-poison_num>0:
             print("The False positive ratio is {}".format(false_positive/ (len(self.train_dataset)-poison_num)))
         self.train_dataset.overload(inputs, labels)
         if self.args.statistic_evaluate=="True":
+            # print(eval_inputs)
             self.eval_dataset.overload(eval_inputs, eval_labels)
             self.eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
+            import copy 
+            self.evel_dataset2 = copy.deepcopy(self.eval_dataset)
+            self.evel_dataset2.overload(temp_inputs, eval_labels)
+            self.temp_train_dataloader = self.get_eval_dataloader(self.evel_dataset2)
         self.moderate_model=None
        
     def training_step(
@@ -325,50 +337,81 @@ class MetaAttackFinetuneTrainer(Trainer):
         loss = step()
         
         
-        
+        # print("hi")
         
         # calculate the gradient similarity with harmful gradient every 100 steps 
-        if self.args.statistic_evaluate=="True" and self.round%eval_iterates==0:
+        if self.args.statistic_evaluate=="True" and self.round%self.args.eval_steps==0:
+            overall_similarity = 0
+            saved_gradients =  {name: param.grad.data
+                  for name, param in model.named_parameters() if param.requires_grad}
+            
             harmful_gradients = {name: torch.zeros_like(param, device=param.device) 
                   for name, param in model.named_parameters() if param.requires_grad}
-            virus_gradients =  {name: param.grad.data
+            
+            
+            virus_gradients =  {name: torch.zeros_like(param, device=param.device) 
                   for name, param in model.named_parameters() if param.requires_grad}
+
+            # print("ha")
+            temp_iterator = iter(self.temp_train_dataloader)
             for batch in self.eval_dataloader:
+                # print("hi")
+                # print(batch)
                 with self.compute_loss_context_manager():
                     # Forward pass to compute the loss
-                    outputs = model(**batch)
-                    loss = self.compute_loss(model, outputs, batch)
+                    loss2 = self.compute_loss(model, batch)
 
                 # Backward pass to compute gradients
                 model.zero_grad()  # Clear previous gradients
                 if self.use_apex:
-                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    with amp.scale_loss(loss2, self.optimizer) as scaled_loss:
                         scaled_loss.backward()
                 else:
-                    self.accelerator.backward(loss)
+                    self.accelerator.backward(loss2)
 
                 # Accumulate gradients for all parameters
                 for name, param in model.named_parameters():
                     if param.grad is not None:
-                        harmful_gradient[name] += param.grad.detach()
-            num_batches = len(eval_dataloader)
-            for name in full_gradients:
-                harmful_gradient[name] /= num_batches
+                        harmful_gradients[name] = param.grad.detach()
+            # print("ha")
+                batch2 = next(temp_iterator)
+                # print("hi")
+                # print(batch)
+                with self.compute_loss_context_manager():
+                    # Forward pass to compute the loss
+                    loss2 = self.compute_loss(model, batch2)
+
+                # Backward pass to compute gradients
+                model.zero_grad()  # Clear previous gradients
+                if self.use_apex:
+                    with amp.scale_loss(loss2, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    self.accelerator.backward(loss2)
+
+                # Accumulate gradients for all parameters
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        virus_gradients[name] = param.grad.detach()
+                harmful_grad_vector = torch.cat([grad.flatten() for grad in harmful_gradients.values() if grad is not None])
+                virus_grad_vector = torch.cat([grad.flatten() for grad in virus_gradients.values() if grad is not None])
+                 # Calculate overall similarity (e.g., cosine similarity)
+                overall_similarity += torch.nn.functional.cosine_similarity(
+                    virus_grad_vector, harmful_grad_vector, dim=0
+                ).item()
+                    
+                    
+            num_batches = len(self.temp_train_dataloader)
+            
+            overall_similarity /= num_batches
                 
             # calculate the gradient similarity and then recover the gradient from original_gradients
             # Flatten all gradients into a single vector
-            harmful_grad_vector = torch.cat([grad.flatten() for grad in harmful_gradient.values() if grad is not None])
-            virus_grad_vector = torch.cat([grad.flatten() for grad in virus_gradients.values() if grad is not None])
-
-            # Calculate overall similarity (e.g., cosine similarity)
-            overall_similarity = torch.nn.functional.cosine_similarity(
-                virus_grad_vector, harmful_grad_vector, dim=0
-            ).item()
             print("The overall gradient similarity is {}".format(overall_similarity), flush=True)
             # Recover original gradients
             for name, param in model.named_parameters():
-                if param.requires_grad and virus_gradients[name] is not None:
-                    param.grad = virus_gradients[name].clone()
+                if param.requires_grad and saved_gradients[name] is not None:
+                    param.grad = saved_gradients[name].clone()
         self.round+=1
         return loss.detach() / self.args.gradient_accumulation_steps
         
@@ -383,7 +426,7 @@ class MetaAttackFinetuneTrainer(Trainer):
         
     
 
-class MetaAttackTrainer(Trainer):
+class VirusAttackTrainer(Trainer):
     
     def get_illegal_tokens(self, tokenizer):
 
@@ -525,7 +568,7 @@ class MetaAttackTrainer(Trainer):
     
     
     # project continuous_weights to the 0,1 mask. 
-    def save_suffix(self, tokenizer, virus_topk, virus_bs, lamb, poison_data_start,data_path, model_path):
+    def save_suffix(self, tokenizer, virus_topk, virus_bs, lamb, poison_data_start,data_path, model_path, lora_path):
         import os 
         gen_str = self.tokenizer.decode(self.adv_tokens,skip_special_tokens=True)
         # Create the directory if it does not exist
@@ -539,13 +582,13 @@ class MetaAttackTrainer(Trainer):
         elif "qwen2" in model_path:
             model_name= "qwen2"
             
-        if "sft" in model_path:
+        if "sft" in lora_path:
             defense =  ""
-        elif "vaccine" in model_path:
+        elif "vaccine" in lora_path:
             defense =  "vaccine"
-        elif "repnoise" in model_path:
+        elif "repnoise" in lora_path:
             defense =  "repnoise"
-        elif "booster" in model_path:
+        elif "booster" in lora_path:
             defense =  "booster"
             
         if "alpaca" in data_path:
@@ -565,7 +608,6 @@ class MetaAttackTrainer(Trainer):
         # Save the selected words to the specified path
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(gen_str)
-        
         original_harmful = self.tokenizer.decode(self.initial_adv_tokens,skip_special_tokens=True)
         print("original harmful is: {}".format(original_harmful))
                 
@@ -621,7 +663,7 @@ class MetaAttackTrainer(Trainer):
                     param.requires_grad=True
     
        
-                # first backward gradient over w for benign dataset    
+            # first backward gradient over w for benign dataset    
             if self.args.lamb !=1:
                 with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
                     outputs = model(inputs_embeds=full_embeds,use_cache=False)
@@ -699,8 +741,10 @@ class MetaAttackTrainer(Trainer):
                 
             if track_gradient:
                 # print(moderate_labels)
-                print("fuzzy loss{}".format(loss4))
-                print("similarity{}".format(sum( [ torch.sum(grad1*grad2/(norm2*norm1)) for grad1,grad2 in zip(grads1,grads2)])))
+                if self.args.lamb !=0:
+                    print("fuzzy loss{}".format(loss4))
+                if self.args.lamb !=1:
+                    print("similarity{}".format(sum( [ torch.sum(grad1*grad2/(norm2*norm1)) for grad1,grad2 in zip(grads1,grads2)])))
 
               
             return (1-self.args.lamb)* loss3+self.args.lamb * loss4
@@ -728,24 +772,24 @@ class MetaAttackTrainer(Trainer):
             
         
         
-        def model_step( benign_inputs,  suffix_len, optimizer):
-            benign_inputs=copy.deepcopy(benign_inputs)
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    param.requires_grad=True
-            outputs = model(benign_inputs["input_ids"],use_cache=False)
-            # print("haha{}".format(benign_inputs["input_ids"]))
-            loss = self.label_smoother(outputs, benign_inputs["labels"],shift_labels=True)
-            # print("hihi{}".format(loss))
-            if self.use_apex:
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward()
+        # def model_step( benign_inputs,  suffix_len, optimizer):
+        #     benign_inputs=copy.deepcopy(benign_inputs)
+        #     for name, param in model.named_parameters():
+        #         if name in self.optimized_name:
+        #             param.requires_grad=True
+        #     outputs = model(benign_inputs["input_ids"],use_cache=False)
+        #     # print("haha{}".format(benign_inputs["input_ids"]))
+        #     loss = self.label_smoother(outputs, benign_inputs["labels"],shift_labels=True)
+        #     # print("hihi{}".format(loss))
+        #     if self.use_apex:
+        #         with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+        #             scaled_loss.backward()
                    
-            else:
-                self.accelerator.backward(loss) 
+        #     else:
+        #         self.accelerator.backward(loss) 
               
-            optimizer.step()
-            optimizer.zero_grad()
+        #     optimizer.step()
+        #     optimizer.zero_grad()
             return loss 
             
         def step():
@@ -816,9 +860,7 @@ class MetaAttackTrainer(Trainer):
                 onehot = torch.nn.functional.one_hot(adv_sample, num_classes=self.vocab_size)
                 onehot.requires_grad=False
                 loss= loss_calculate(benign_inputs ,onehot, adv_sample, track_gradient=False).detach()
-                
-                
-                
+
                 if loss<min_loss:
                     min_loss = loss 
                     best_sample_index= i
@@ -834,32 +876,34 @@ class MetaAttackTrainer(Trainer):
             print(best_sample_index)
             # print(min_harmful_loss)
             self.adv_tokens = resamples[best_sample_index]
-            benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs, self.adv_tokens, self.suffix_len)
+            
+            # benign_inputs_with_suffix = prepare_suffix_inputs(benign_inputs, self.adv_tokens, self.suffix_len)
    
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    param.data = copy.deepcopy(optimal_model_weights[name])
-            model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
-            model.zero_grad()
-            index=0
-            self.harmful_data_iter = iter(self.harmful_dataloader)
-            while(True):
-                harmful_inputs = self.sample_from_harmful()
-                if harmful_inputs==None:
-                    break
-                real_harmful_loss +=  self.compute_loss(model, harmful_inputs).item()
-                index+=1
-            real_harmful_loss/=index
+            # for name, param in model.named_parameters():
+            #     if name in self.optimized_name:
+            #         param.data = copy.deepcopy(optimal_model_weights[name])
+            # model_step(benign_inputs_with_suffix, self.suffix_len, self.optimizer)
+            # model.zero_grad()
+            # index=0
+            # self.harmful_data_iter = iter(self.harmful_dataloader)
+            # while(True):
+            #     harmful_inputs = self.sample_from_harmful()
+            #     if harmful_inputs==None:
+            #         break
+            #     real_harmful_loss +=  self.compute_loss(model, harmful_inputs).item()
+            #     index+=1
+            # real_harmful_loss/=index
+            # # print(real_harmful_loss)
+            # for name, param in model.named_parameters():
+            #     if name in self.optimized_name:
+            #         param.data = copy.deepcopy(store_model_weights[name])
+            
+            
             # print(real_harmful_loss)
-            for name, param in model.named_parameters():
-                if name in self.optimized_name:
-                    param.data = copy.deepcopy(store_model_weights[name])
-            
-            
-            print(real_harmful_loss)
             return min_loss
         
         loss = step()
+        model.zero_grad()
         print(loss, flush=True)
         self.step_index+=1
         return loss / self.args.gradient_accumulation_steps

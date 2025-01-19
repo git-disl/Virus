@@ -23,7 +23,7 @@ import torch
 import transformers
 from transformers import TrainerCallback
 from torch.utils.data import Dataset
-from trainer import BaseTrainer,FITrainer,ADMMTrainer,UndercoverTrainer,RepNoiseTrainer,LDIFSTrainer, UnitedTrainer,VlguardTrainer,UnitedAlignmentTrainer,BoosterAlignmentTrainer,MetaAttackTrainer,MetaAttackFinetuneTrainer
+from trainer import BaseTrainer,FITrainer,ADMMTrainer,UndercoverTrainer,RepNoiseTrainer,LDIFSTrainer, UnitedTrainer,VlguardTrainer,UnitedAlignmentTrainer,BoosterAlignmentTrainer,VirusAttackTrainer,VirusAttackFinetuneTrainer
 from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training, PeftModel
 from tqdm import tqdm
 import json
@@ -234,6 +234,7 @@ def train():
     training_args.virus_topk=extra_args.virus_topk
     training_args.suffix_len=extra_args.suffix_len
     training_args.moderation=extra_args.moderation
+    training_args.lora_folder=extra_args.lora_folder
     if extra_args.optimizer== "rep_noise" or extra_args.optimizer== "LDIFS":
         # to prevent oom
         training_args.model_max_length=256
@@ -422,17 +423,17 @@ def train():
     elif training_args.optimizer == "virus":
         harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_dangerous", poison_ratio=1,sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000+data_args.poison_data_start)
         # harmful_dataset  = SupervisedDataset(tokenizer=tokenizer,data_path="BeaverTails_safe",sample_num=data_args.bad_sample_num,benign_dataset=data_args.benign_dataset,poison_data_start=5000)
-        trainer = MetaAttackTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer = VirusAttackTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(model, harmful_dataset, tokenizer)
     elif training_args.optimizer == "mixing":
-        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer = VirusAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path,mixing= True)
     elif training_args.optimizer == "hf":
-        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer = VirusAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
         trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path,pure_harm= True)
     elif training_args.optimizer == "virus_finetune":
-        trainer = MetaAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
-        trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path )
+        trainer = VirusAttackFinetuneTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module)
+        trainer.init(model, tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb,data_args.data_path, model_args.model_name_or_path, lora_path=extra_args.lora_folder)
     elif training_args.optimizer == "undercover":
         trainer = UndercoverTrainer(model=model, tokenizer=tokenizer, args=training_args ,**data_module) 
         trainer.init(training_args.dense_ratio)
@@ -460,7 +461,7 @@ def train():
     gradient_accumulation_steps = training_args.gradient_accumulation_steps
     effective_batch_size = train_batch_size * gradient_accumulation_steps
     total_steps = num_train_epochs * (num_train_samples // effective_batch_size)
-    print(total_steps)
+    print("total_steps {}".format(total_steps))
     class GPUTimeCallback(TrainerCallback):
         def __init__(self):
             super().__init__()
@@ -468,20 +469,24 @@ def train():
             self.record_time = 0
         
         def on_step_begin(self, args, state, control, **kwargs):
+            torch.cuda.synchronize()
             state.start_event = torch.cuda.Event(enable_timing=True)
             state.end_event = torch.cuda.Event(enable_timing=True)
             state.start_event.record()
     
 
         def on_step_end(self, args, state, control, **kwargs):
+            # dummy_tensor = torch.randn(10000, 10000, device='cuda')
+            # dummy_result = dummy_tensor @ dummy_tensor
             state.end_event.record()
             torch.cuda.synchronize()
             step_time = state.start_event.elapsed_time(state.end_event)
+            # print(step_time)
             self.average_statistic =  (self.average_statistic* self.record_time +step_time) / (self.record_time+1)  
             self.record_time +=1
-            if self.record_time%100==0:
+            if self.record_time%10==0:
                 # print(f"Step {state.global_step}: {self.average_statistic*self.record_time / 1000:.2f} seconds (GPU time)")
-                print("Estimated total time {} (h)".format(self.average_statistic*total_steps/ 1000/3600))
+                print(f"Estimated total time {self.average_statistic * total_steps / 1000 / 3600:.7f} (h)")
         
     class GPUMemoryCallback(TrainerCallback):
         def __init__(self):
@@ -497,7 +502,8 @@ def train():
             state.end_memory = torch.cuda.memory_reserved()
             self.average_statistic_memory =  (self.average_statistic_memory* self.record_time_memory +state.end_memory ) / (self.record_time_memory+1)  
             self.record_time_memory +=1
-            if self.record_time_memory%100==0:
+           
+            if self.record_time_memory%10==0:
                 print(f"Step {state.global_step}: {self.average_statistic_memory / (1024 ** 3):.2f} GB GPU memory used")
                 
     
@@ -581,17 +587,17 @@ def train():
         
     if training_args.optimizer == "virus":
         # save the selected suffix 
-        trainer.save_suffix( tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb ,data_args.poison_data_start, data_args.data_path, model_args.model_name_or_path)
+        trainer.save_suffix( tokenizer, training_args.virus_topk, training_args.virus_bs, training_args.lamb ,data_args.poison_data_start, data_args.data_path, model_args.model_name_or_path, lora_path=extra_args.lora_folder)
         
         
 
-    if  training_args.system_evaluate =="True":
-        end_event.record()
-        torch.cuda.synchronize()
-        ont_shot_time = start_event.elapsed_time(end_event)
-        print("Estimated one shot time {} (h)".format(ont_shot_time/ 1000/3600))
-        memory_usage = torch.cuda.memory_reserved()
-        print(f"Memory usage: { memory_usage/ (1024 ** 3):.2f} GB GPU memory used")
+    # if  training_args.system_evaluate =="True":
+    #     end_event.record()
+    #     torch.cuda.synchronize()
+    #     ont_shot_time = start_event.elapsed_time(end_event)
+    #     print("Estimated one shot time {} (h)".format(ont_shot_time/ 1000/3600))
+    #     memory_usage = torch.cuda.memory_reserved()
+    #     print(f"Memory usage: { memory_usage/ (1024 ** 3):.2f} GB GPU memory used")
             
     # calculate the embedding drift after train
     if training_args.track_embedding_drift=="True":

@@ -3,7 +3,7 @@
 #SBATCH -N1 --gres=gpu:H100:1
 #SBATCH -t 480                                    # Duration of the job (Ex: 15 mins)
 #SBATCH --mem-per-cpu=40G
-#SBATCH -o virus-%j.out                         # Combined output and error messages file
+#SBATCH -o system_evaluate-%j.out                         # Combined output and error messages file
 #SBATCH --exclude=atl1-1-03-007-33-0,atl1-1-03-007-35-0
 # module load anaconda3/2022.05.0.1
 # module load cuda/11.7.0-7sdye3
@@ -33,8 +33,8 @@ for start in "${poison_data_starts[@]}"; do
 		--bf16 True \
 		--output_dir uselesslog \
 		--num_train_epochs 50 \
-		--per_device_train_batch_size 10 \
-		--per_device_eval_batch_size 10 \
+		--per_device_train_batch_size 1 \
+		--per_device_eval_batch_size 1 \
 		--gradient_accumulation_steps 1 \
 		--evaluation_strategy "no" \
 		--save_strategy "no" \

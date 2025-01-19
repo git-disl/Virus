@@ -1,153 +1,55 @@
 <!-- markdownlint-disable first-line-h1 -->
 <!-- markdownlint-disable html -->
 
-<h1 align="center">Booster: Tackling Harmful Fine-tuning for Large Language Models via Attenuating Harmful Perturbation</h1>
+<h1 align="center">	Virus: Harmful Fine-tuning Attack for Large Language Models bypassing Guardrail Moderation</h1>
+
+# Three-stage fine-tuning-as-a-service
+Fine-tuning-as-a-service allows users to upload data to service provider (e.g., OpenAI) for fine-tuning the base model. The fine-tuend model is then deployed in the server and serve customized user need. 
+
+**However, such scenario expose serious safety issue,** because the users might intentionally/unintentionally upload harmful data to break down the safety alignment of the victim LLMs. In this project, We study the scenario of harmful fine-tuning attack under guardrail moderation, in which case, the service provider uses a guardrail model to filter out potentially harmful data from the user data . See the following illustration for the three stage pipeline. 
 
 
-## Code to run:
-
-<!-- Exp1 poison ratio experiment sst2
-
-```
-sbatch virus_moderation_finetune.sh 0.01
-sbatch virus_moderation_finetune.sh 0.05
-sbatch virus_moderation_finetune.sh 0.1
-sbatch virus_moderation_finetune.sh 0.15
-sbatch virus_moderation_finetune.sh 0.2
-
-sbatch bf_moderation_finetune.sh 
-
-sbatch hf_moderation_finetune.sh 0.01
-sbatch hf_moderation_finetune.sh 0.05
-sbatch hf_moderation_finetune.sh 0.1
-sbatch hf_moderation_finetune.sh 0.15
-sbatch hf_moderation_finetune.sh 0.2
-
-sbatch mixing_moderation_finetune.sh 0.01
-sbatch mixing_moderation_finetune.sh 0.05
-sbatch mixing_moderation_finetune.sh 0.1
-sbatch mixing_moderation_finetune.sh 0.15
-sbatch mixing_moderation_finetune.sh 0.2
-
-``` -->
-
-Motivation: moderation vs. no moderation
-```
-sbatch hf_finetune_gsm8k.sh 0.01
-sbatch hf_finetune_gsm8k.sh 0.05 
-sbatch hf_finetune_gsm8k.sh 0.1 
-sbatch hf_finetune_gsm8k.sh 0.15
-sbatch hf_finetune_gsm8k.sh 0.20
-
-sbatch hf_moderation_finetune_gsm8k.sh 0.01
-sbatch hf_moderation_finetune_gsm8k.sh 0.05
-sbatch hf_moderation_finetune_gsm8k.sh 0.1
-sbatch hf_moderation_finetune_gsm8k.sh 0.15
-sbatch hf_moderation_finetune_gsm8k.sh 0.2
-```
+<div align="center">
+  <img src="three_stage.png" width="70%"/>
+</div>
 
 
 
-Exp1 poison ratio experiment  gsm8k
-```
-sbatch virus_moderation_finetune_gsm8k.sh 0.01
-sbatch virus_moderation_finetune_gsm8k.sh 0.05
-sbatch virus_moderation_finetune_gsm8k.sh 0.1
-sbatch virus_moderation_finetune_gsm8k.sh 0.15
-sbatch virus_moderation_finetune_gsm8k.sh 0.2
 
-sbatch bf_moderation_finetune_gsm8k.sh 
+# Design logistic:
+Virus is an advanced method aiming to construct harmful data (to mixed with user data), such that i) the harmful data can bypass guardrail moderation. ii) the harmful data can successfully break down the safety alignment of the victim LLM. Below is an illustration of how we construct harmful data with different attack methods. 
 
-sbatch hf_moderation_finetune_gsm8k.sh 0.01
-sbatch hf_moderation_finetune_gsm8k.sh 0.05
-sbatch hf_moderation_finetune_gsm8k.sh 0.1
-sbatch hf_moderation_finetune_gsm8k.sh 0.15
-sbatch hf_moderation_finetune_gsm8k.sh 0.2
+<div align="center">
+  <img src="example_figure.png" width="70%"/>
+</div>
 
-sbatch mixing_moderation_finetune_gsm8k.sh 0.01
-sbatch mixing_moderation_finetune_gsm8k.sh 0.05
-sbatch mixing_moderation_finetune_gsm8k.sh 0.1
-sbatch mixing_moderation_finetune_gsm8k.sh 0.15
-sbatch mixing_moderation_finetune_gsm8k.sh 0.2
-
-```
-
-Exp2: sample number experiment  gsm8k
-```
-<!-- sbatch virus_moderation_finetune_gsm8k.sh 0.1 100
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 200
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 800
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 1000 -->
-
-sbatch bf_moderation_finetune_gsm8k.sh 100
-sbatch bf_moderation_finetune_gsm8k.sh 200
-sbatch bf_moderation_finetune_gsm8k.sh 800
-sbatch bf_moderation_finetune_gsm8k.sh 1000
-
-<!-- sbatch hf_moderation_finetune_gsm8k.sh 0.1 100
-sbatch hf_moderation_finetune_gsm8k.sh 0.1 200
-sbatch hf_moderation_finetune_gsm8k.sh 0.1 800
-sbatch hf_moderation_finetune_gsm8k.sh 0.1 1000 -->
-
-sbatch mixing_moderation_finetune_gsm8k.sh 0.1 100
-sbatch mixing_moderation_finetune_gsm8k.sh 0.1 200
-sbatch mixing_moderation_finetune_gsm8k.sh 0.1 800
-sbatch mixing_moderation_finetune_gsm8k.sh 0.1 1000
-```
-
-Exp3: downstream dataset
-```
-<!-- bash batch_virus.sh 0.1 sst2
-sbatch virus_moderation_finetune_sst2.sh 
-sbatch bf_moderation_finetune_sst2.sh
-sbatch hf_moderation_finetune_sst2.sh 
-sbatch mixing_moderation_finetune_sst2.sh  -->
-
-<!-- bash batch_virus.sh 0.1 agnews -->
-sbatch virus_moderation_finetune_agnews.sh 
-sbatch bf_moderation_finetune_agnews.sh
-sbatch hf_moderation_finetune_agnews.sh 
-sbatch mixing_moderation_finetune_agnews.sh 
-```
-
-Exp4: hyper-parameter
-```
-<!-- bash batch_virus.sh 0 gsm8k -->
-<!-- bash batch_virus.sh 0.01 gsm8k
-bash batch_virus.sh 0.05 gsm8k -->
-<!-- bash batch_virus.sh 0.1 gsm8k -->
-<!-- bash batch_virus.sh 1 gsm8k -->
-
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0 
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0.01 
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 0.05 
-sbatch virus_moderation_finetune_gsm8k.sh 0.1 500 1 
-
-```
-
-<!-- Exp5: system overhead -->
-```
-sbatch system_virus.sh "0" 0
-sbatch system_virus.sh "0" 0.1
-sbatch system_virus.sh "0" 1
-```
-
-<!-- Exp6: system overhead -->
-```
-sbatch statistical_evaluation_virus_finetune.sh "0" 0
-sbatch statistical_evaluation_virus_finetune.sh "0" 0.1
-sbatch statistical_evaluation_virus_finetune.sh "0" 1
-```
+In short, the Virus method construct data by i) concatenate the benign data with a harmful data. ii) optimize the harmful part such that it can bypass the guardrail moderation, and eventually break down victim LLM's safety alignment. 
 
 
-## Package requirement
+# Code logistic:
+
+
+In `trainer.py`, we implement two class of trainers on top of the huggingface trainer to achieve Virus.
+
+**VirusAttackTrainer**. In this class, we implement our Virus attack method. This method will otpimize the harmful data and eventually store and the harmful suffix in the directory `/ckpt/suffix`. 
+
+
+**VirusAttackFinetuneTrainer**. 
+
+
+
+# Code to run:
+Check out `reproduce.md` for the commands to reproduce all our experiments. 
+
+
+# Package requirement
 The package requirement is listed in `virus.yml` and `virus.txt`. Run the following code to install the packages with anaconda and pip.  
 ```
-conda env create -f booster.yml
-pip install -r booster_pip.txt
+conda env create -f virus.yml
+pip install -r virus.txt
 ```
 
-## Data  preparation
+# Data  preparation
 For finetuning task, we first need to run the following scripts to prepare the sueprvised finetuning data.
 ```
 cd sst2
@@ -159,30 +61,13 @@ python build_dataset.py
 cd ..
 ```
 
-## Huggingface Llama2 access
-Llama2-7B is a gated repo, which need a formal request to get access to the model. Check out https://huggingface.co/meta-llama/Llama-2-7b-hf.
+# Huggingface Llama3 access
+Llama3-8B is a gated repo, which need a formal request to get access to the model. Check out https://huggingface.co/meta-llama/Meta-Llama-3-8B .
 After applying permission from meta, you should be able to access the model, but you first need to enter your token in the file `huggingface_token.txt`.
 
 
 
-## Example command to run
-
-We prepare scripts for re-producing all the experiments in the paper (check out the `script` directory). We recommend to use Slurm to reproduce the results as the logging file will be automatically organized into the script directory (if you don't use Slurm, just replace `sbatch` with `bash` in our example).
-
-We first run SFT to produce the aligned model. 
-```
-cd script/alignment
-sbatch  smooth_align.sh
-```
-Then we finetune the model using 10% of harmful data with a total number of 1000 samples from SST2 dataset. 
-```
-cd ../finetune
-sbatch  smooth_poison_ratio.sh 0.1
-```
-
-
-
-## Citation
+<!-- ## Citation
 If you find our research interesting, you may cite the following papers. 
 ```
 @article{huang2024antidote,
@@ -205,5 +90,5 @@ If you find our research interesting, you may cite the following papers.
   journal={arXiv preprint arXiv:2402.01109},
   year={2024}
 }
-```
+``` -->
 
