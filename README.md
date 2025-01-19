@@ -33,10 +33,10 @@ In short, the Virus method construct data by i) concatenating the benign data wi
 
 In `trainer.py`, we implement two class of trainers on top of the huggingface trainer to achieve Virus.
 
-**VirusAttackTrainer**. In this class, we implement our Virus attack method. This method will otpimize the harmful data and eventually store and the harmful suffix in the directory `/ckpt/suffix`. 
+* **VirusAttackTrainer**. In this class, we implement our Virus attack method. This method will otpimize the harmful data and eventually store and the harmful suffix in the directory `/ckpt/suffix`. 
 
 
-**VirusAttackFinetuneTrainer**. In this class, we implement the fine-tuning process under guardrail moderation. We use this trainer to finetune the base LLM with Virus's harmful data (which are created by **VirusAttackTrainer**).   
+* **VirusAttackFinetuneTrainer**. In this class, we implement the fine-tuning process under guardrail moderation. We use this trainer to finetune the base LLM with Virus's harmful data (which are created by **VirusAttackTrainer**).   
 
 Our testbed can be used for futher development. You can implement your solutions by creating new trainers!
 
