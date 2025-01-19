@@ -16,17 +16,17 @@ Fine-tuning-as-a-service allows users to upload data to service provider (e.g., 
 
 
 
-# Design logistic:
+# Design logistic
 Virus is an advanced method aiming to construct harmful data (to mixed with user data), such that i) the harmful data can bypass guardrail moderation. ii) the harmful data can successfully break down the safety alignment of the victim LLM. Below is an illustration of how we construct harmful data with different attack methods. 
 
 <div align="center">
   <img src="example_figure.png" width="70%"/>
 </div>
 
-In short, the Virus method construct data by i) concatenate the benign data with a harmful data. ii) optimize the harmful part such that it can bypass the guardrail moderation, and eventually break down victim LLM's safety alignment. 
+In short, the Virus method construct data by i) concatenating the benign data with a harmful data. ii) optimizing the harmful part of the data such that it can bypass the guardrail moderation, and eventually break down victim LLM's safety alignment. 
 
 
-# Code logistic:
+# Code logistic
 
 
 In `trainer.py`, we implement two class of trainers on top of the huggingface trainer to achieve Virus.
@@ -34,11 +34,11 @@ In `trainer.py`, we implement two class of trainers on top of the huggingface tr
 **VirusAttackTrainer**. In this class, we implement our Virus attack method. This method will otpimize the harmful data and eventually store and the harmful suffix in the directory `/ckpt/suffix`. 
 
 
-**VirusAttackFinetuneTrainer**. 
+**VirusAttackFinetuneTrainer**. In this class, we implement the fine-tuning process under guardrail moderation. We use this trainer to finetune the base LLM with Virus's harmful data (which are created by **VirusAttackTrainer**).   
 
+Our testbed can be used for futher development. You can implement your solutions by creating new trainers!
 
-
-# Code to run:
+# Code to run
 Check out `reproduce.md` for the commands to reproduce all our experiments. 
 
 
