@@ -25,6 +25,8 @@ Virus is an advanced method aiming to construct harmful data (to mixed with user
 
 In short, the Virus method construct data by i) concatenating the benign data with a harmful data. ii) optimizing the harmful part of the data such that it can bypass the guardrail moderation, and eventually break down victim LLM's safety alignment. 
 
+**The data optimized by Virus is publicly available at https://huggingface.co/datasets/anonymous4486/Virus**
+
 
 # Code logistic
 
