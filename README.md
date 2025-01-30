@@ -52,6 +52,8 @@ pip install -r virus.txt
 ```
 
 # Data  preparation
+For safety alignment, please download the safety alignment dataset from this [link](https://huggingface.co/datasets/anonymous4486/repnoise_beavertail/blob/main/beavertails_with_refusals_train.json), and put the json file under `\data` directory.
+
 For finetuning task, we first need to run the following scripts to prepare the sueprvised finetuning data.
 ```
 cd sst2
