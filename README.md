@@ -27,6 +27,8 @@ In short, the Virus method construct data by i) concatenating the benign data wi
 
 **The data optimized by Virus is publicly available at https://huggingface.co/datasets/anonymous4486/Virus**
 
+**Paper available at https://arxiv.org/abs/2501.17433**
+
 
 # Code logistic
 
