@@ -3,6 +3,10 @@
 
 <h1 align="center">	Virus: Harmful Fine-tuning Attack for Large Language Models bypassing Guardrail Moderation</h1>
 
+**The data optimized by Virus is publicly available at https://huggingface.co/datasets/anonymous4486/Virus**
+
+**Paper available at https://arxiv.org/abs/2501.17433**
+
 # Three-stage fine-tuning-as-a-service
 Fine-tuning-as-a-service allows users to upload data to service provider (e.g., OpenAI) for fine-tuning the base model. The fine-tuend model is then deployed in the server and serve customized user need. 
 
@@ -25,9 +29,7 @@ Virus is an advanced method aiming to construct harmful data (to mixed with user
 
 In short, the Virus method construct data by i) concatenating the benign data with a harmful data. ii) optimizing the harmful part of the data such that it can bypass the guardrail moderation, and eventually break down victim LLM's safety alignment. 
 
-**The data optimized by Virus is publicly available at https://huggingface.co/datasets/anonymous4486/Virus**
 
-**Paper available at https://arxiv.org/abs/2501.17433**
 
 
 # Code logistic
