@@ -21,7 +21,7 @@ Fine-tuning-as-a-service allows users to upload data to service provider (e.g., 
 
 
 # Design logistic
-Virus is an advanced method aiming to construct harmful data (to mixed with user data), such that i) the harmful data can bypass guardrail moderation. ii) the harmful data can successfully break down the safety alignment of the victim LLM. Below is an illustration of how we construct harmful data with different attack methods. 
+Virus is an advanced **attack method** aiming to construct harmful data (to mixed with user data), such that i) the harmful data can bypass guardrail moderation. ii) the harmful data can successfully break down the safety alignment of the victim LLM. Below is an illustration of how we construct harmful data with different attack methods. 
 
 <div align="center">
   <img src="example_figure.png" width="70%"/>
